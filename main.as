@@ -17,7 +17,9 @@
 // While the pencil is on, every open end of the track already in the map shows as a node: a line started on one
 // carries it on (its height, heading and width), and a line ending on one joins it when the pieces can meet it exactly.
 // The joins between pieces already in the map are nodes too, shown near the cursor: a line started on one branches off
-// there (the way it is drawn), one ending on one merges in. A line drawn back to its own start closes into a loop.
+// there (the way it is drawn), one ending on one merges in. So are the sides of level pieces: near a side, a node on it
+// follows the cursor, and a line from it leaves the side square to it (or ends there, into it). A line drawn back to
+// its own start closes into a loop.
 // Where the track would pass through a piece already there (or itself), it rises over it as a bridge with ramps either
 // side, or ends before it when it can't climb in time or the piece is too tall.
 //
@@ -132,6 +134,124 @@ class OpenEnd
     int piece;
     bool joined = false;        // another piece's end is on it: a join between two pieces (a node shown near the cursor)
     OpenEnd@ twin;              // a join's other end (the other piece's, facing the other way)
+    bool side = false;          // a point on a piece's side (where the cursor is near it), facing out of it
+}
+
+// The side edges of a level piece of a kit, for nodes on them: a straight (its centre line from a to b) or a turn (an
+// arc around (cx, cy) of radius r from angle a0 over span, radians), at the rolling surface's height, so wide.
+class Side
+{
+    int piece;
+    int kit;
+    double z, width;
+    bool arc = false;
+    double ax, ay, bx, by;
+    double cx, cy, r, a0, span;
+}
+array<Side@> sides;
+
+// The node on side s nearest the plan point (px, py), when the point is near one of its edges (within reach, cm) and
+// not by its ends: written into node (the edge point, facing out of the piece); false if none. `off` gets how far the
+// point is from the edge.
+bool SideAt(Side@ s, double px, double py, double reach, OpenEnd@ node, double &out off)
+{
+    off = 1e30;
+    double hw = s.width / 2;
+    double ex, ey, ox, oy;                  // the edge point and the way out
+    if (!s.arc)
+    {
+        double dx = s.bx - s.ax, dy = s.by - s.ay, len = Math::sqrt(dx * dx + dy * dy);
+        if (len < 1)
+            return false;
+        double ux = dx / len, uy = dy / len;
+        double t = (px - s.ax) * ux + (py - s.ay) * uy;
+        if (t < kSideEndMargin || t > len - kSideEndMargin)
+            return false;                   // at an end: its node (or join) is there
+        double across = -(px - s.ax) * uy + (py - s.ay) * ux;
+        double sign = across >= 0 ? 1 : -1;
+        off = Math::abs(Math::abs(across) - hw);
+        ox = -uy * sign;
+        oy = ux * sign;
+        ex = s.ax + ux * t + ox * hw;
+        ey = s.ay + uy * t + oy * hw;
+    }
+    else
+    {
+        double vx = px - s.cx, vy = py - s.cy, d = Math::sqrt(vx * vx + vy * vy);
+        if (d < 1)
+            return false;
+        double ang = Math::atan2(vy, vx) - s.a0;
+        while (ang > 3.14159265) ang -= 6.2831853;
+        while (ang < -3.14159265) ang += 6.2831853;
+        double along = s.span >= 0 ? ang : -ang, total = Math::abs(s.span), margin = kSideEndMargin / s.r;
+        if (along < margin || along > total - margin)
+            return false;
+        bool outer = d >= s.r;
+        double edge = outer ? s.r + hw : s.r - hw;
+        off = Math::abs(d - edge);
+        ox = (outer ? 1 : -1) * vx / d;
+        oy = (outer ? 1 : -1) * vy / d;
+        ex = s.cx + vx / d * edge;
+        ey = s.cy + vy / d * edge;
+    }
+    if (off > reach)
+        return false;
+    node.x = ex;
+    node.y = ey;
+    node.z = s.z;
+    node.heading = Deg(Math::atan2(oy, ox));
+    node.width = s.width;
+    node.kit = s.kit;
+    node.piece = s.piece;
+    node.level = true;
+    node.side = true;
+    node.joined = false;
+    @node.twin = null;
+    return true;
+}
+
+const double kSideEndMargin = 30;       // cm: a side node is no nearer a piece's end than this (an end or join node is there)
+
+// The node on a side the cursor is near now (one, reused), or null.
+OpenEnd sideNode;
+bool sideNear = false;
+
+void FindSideNode(float mx, float my)
+{
+    sideNear = false;
+    double best = 1e30;
+    OpenEnd found;
+    for (uint i = 0; i < sides.length(); i++)
+    {
+        Side@ s = sides[i];
+        double px, py, pz, along, off;
+        if (!DrawCore_OnPlane(mx, my, s.z, px, py, pz, along))
+            continue;
+        double reach = s.width * 0.3 > 150 ? s.width * 0.3 : 150;
+        if (SideAt(s, px, py, reach, found, off) && off / reach < best)
+        {
+            best = off / reach;
+            CopyEnd(found, sideNode);
+            sideNear = true;
+        }
+    }
+    sideScore = best * kSnapPixels * 1.3;
+}
+double sideScore = 1e30;
+
+void CopyEnd(OpenEnd@ from, OpenEnd@ to)
+{
+    to.x = from.x;
+    to.y = from.y;
+    to.z = from.z;
+    to.heading = from.heading;
+    to.width = from.width;
+    to.level = from.level;
+    to.kit = from.kit;
+    to.piece = from.piece;
+    to.joined = from.joined;
+    @to.twin = from.twin;
+    to.side = from.side;
 }
 
 // One part of the line's plan: a straight (its length in plan) or a 90-degree turn.
@@ -529,6 +649,7 @@ void FindPieces()
 {
     openEnds.resize(0);
     obstacles.resize(0);
+    sides.resize(0);
     array<int>@ pieces = Editor::Pieces();
     array<OpenEnd@> all;
     for (uint i = 0; i < pieces.length(); i++)
@@ -571,6 +692,34 @@ void FindPieces()
             double depth = (hasBox ? a[2] - (o.bcz - o.bhz) : 100) * sz;
             if (Math::abs(adz) < 0.05 && Math::abs(bdz) < 0.05 && Math::abs(az - bz) < 5)
                 ArcFrom(o, x + ax, y + ay, z + az, adx, ady, x + bx, y + by, bdx, bdy, width, depth);
+            // a level piece of one kit: its sides are nodes (shown where the cursor is near one)
+            if (ka >= 0 && ka == kb && Math::abs(adz) < 0.05 && Math::abs(bdz) < 0.05 && Math::abs(az - bz) < 5 &&
+                Math::abs(roll) <= 1)
+            {
+                Side sd;
+                sd.piece = pieces[i];
+                sd.kit = ka;
+                sd.z = z + az;
+                sd.width = width;
+                if (adx * bdx + ady * bdy < -0.99)
+                {
+                    sd.ax = x + ax;
+                    sd.ay = y + ay;
+                    sd.bx = x + bx;
+                    sd.by = y + by;
+                    sides.insertLast(sd);
+                }
+                else if (o.arc)
+                {
+                    sd.arc = true;
+                    sd.cx = o.cx;
+                    sd.cy = o.cy;
+                    sd.r = o.r;
+                    sd.a0 = o.a0;
+                    sd.span = o.span;
+                    sides.insertLast(sd);
+                }
+            }
             for (int end = 0; end < 2; end++)
             {
                 double ex = end == 0 ? ax : bx, ey = end == 0 ? ay : by, ez = end == 0 ? az : bz;
@@ -713,6 +862,8 @@ OpenEnd@ EndUnderCursor(float mx, float my)
             @best = e;
         }
     }
+    if (sideNear && sideScore < bestScore)
+        @best = sideNode;
     return best;
 }
 
@@ -791,7 +942,11 @@ void ShowMarkers(bool on)
         }
     }
     if (hoverEnd is markedHover)
+    {
+        if (hoverEnd !is null && hoverEnd.side && hoverMark != 0)
+            Draw::Move(hoverMark, hoverEnd.x, hoverEnd.y, hoverEnd.z + 20);
         return;
+    }
     @markedHover = hoverEnd;
     if (hoverMark != 0)
         Draw::Remove(hoverMark);
@@ -803,6 +958,8 @@ void ShowMarkers(bool on)
         return;
     hoverMark = Draw::Ball(90, LIME_R, LIME_G, LIME_B, true);
     Draw::Move(hoverMark, hoverEnd.x, hoverEnd.y, hoverEnd.z + 20);
+    if (hoverEnd.side)
+        return;                         // (it moves with the cursor: no guide line)
     // the way a line from it goes (a join: both ways along the track)
     double h = Rad(hoverEnd.heading);
     double back = hoverEnd.joined ? 2000 : 0;
@@ -2434,7 +2591,7 @@ void ShowState()
             t = (rise >= 0 ? "+" : "") + formatFloat(rise / 100, "", 0, 1) + " m";
         }
         else if (hoverEnd !is null)
-            t = KitLabel(hoverEnd.kit) + (hoverEnd.joined ? " join: " : " node: ") + formatFloat(hoverEnd.width / 100, "", 0, 1) + " m wide" +
+            t = KitLabel(hoverEnd.kit) + (hoverEnd.side ? " side: " : hoverEnd.joined ? " join: " : " node: ") + formatFloat(hoverEnd.width / 100, "", 0, 1) + " m wide" +
                 (nodeOffset != 0 ? ", to " + (nodeOffset > 0 ? "+" : "") + formatFloat(nodeOffset / 100, "", 0, 1) + " m" : "");
         else
             t = "level " + formatFloat(height / 100, "", 0, 1) + " m";
@@ -2446,7 +2603,8 @@ void ShowState()
     if (DrawCore_State() == kStateDrawing)
         note = track.length() + (track.length() == 1 ? " piece" : " pieces") + (fitNote != "" ? ": " + fitNote : "");
     else if (hoverEnd !is null)
-        note = hoverEnd.joined ? "a " + KitLabel(hoverEnd.kit) + " join: a line from here branches off the way you draw" :
+        note = hoverEnd.side ? "the side of a " + KitLabel(hoverEnd.kit) + " piece: a line from here leaves it square to it" :
+               hoverEnd.joined ? "a " + KitLabel(hoverEnd.kit) + " join: a line from here branches off the way you draw" :
                                  "carries on this " + KitLabel(hoverEnd.kit) + " end";
     else if (pencil && unreachable)
         note = "the height is out of view here: a click starts 10 m below the camera";
@@ -2572,6 +2730,7 @@ void Update(float dt)
     if (!drawingNow && cursor)
     {
         FindNearJoins(mx, my);
+        FindSideNode(mx, my);
         @hoverEnd = EndUnderCursor(mx, my);
         if (hoverEnd !is offsetNode)
         {
@@ -2613,6 +2772,7 @@ void Update(float dt)
     {
         // the end it would join, while drawing
         FindNearJoins(mx, my);
+        FindSideNode(mx, my);
         OpenEnd@ e = EndUnderCursor(mx, my);
         if (e !is hoverEnd)
         {
@@ -2655,6 +2815,12 @@ void Update(float dt)
     {
         // a new line: carrying on a node (its width too), or starting where it was pressed
         @startEnd = hoverEnd;
+        if (startEnd !is null && startEnd.side)
+        {
+            OpenEnd fixed;
+            CopyEnd(startEnd, fixed);
+            @startEnd = fixed;          // where the line left the side stays put
+        }
         lineWidth = startEnd !is null ? startEnd.width : -1;
         if (startEnd !is null && startEnd.kit != kitChoice)
             ChooseKit(startEnd.kit);    // the node's kit, carried on (as a road tool takes the road type it starts on)

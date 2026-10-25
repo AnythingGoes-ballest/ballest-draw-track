@@ -328,6 +328,77 @@ void Lines(int k)
         Print(kn + name + ": " + track.length() + " pieces (" + fitNote + ")");
     }
 
+    // the side of a straight already in the map (piece 21, 10 m along x from -500 to 500, at the line's height): the
+    // node the cursor finds near its +y edge, and a line from it leaving square to the side; then one ending into it
+    {
+        Reset(k);
+        Obstacle o;
+        o.piece = 21;
+        o.x = 0;
+        o.y = 0;
+        o.z = z - kit[kits[k].straights[0]].a[2];
+        Axes(0, 0, o.m);
+        o.sx = 1000 / StraightLength(kits[k].straights[0]);
+        BoxFor(ClassName(kit[kits[k].straights[0]].classPath), o);
+        o.top = BoxTop(o);
+        Bound(o);
+        obstacles.insertLast(o);
+        Side sd;
+        sd.piece = 21;
+        sd.kit = k;
+        sd.z = z;
+        sd.width = kits[k].width;
+        sd.ax = -500;
+        sd.ay = 0;
+        sd.bx = 500;
+        sd.by = 0;
+        OpenEnd node;
+        double off;
+        bool found = SideAt(sd, 120, kits[k].width / 2 + 60, 150, node, off);
+        Check(found && Near(node.x, 120, 0.01) && Near(node.y, kits[k].width / 2, 0.01) && Near(node.heading, 90, 0.01),
+              kn + " side: the node at " + node.x + ", " + node.y + " heading " + node.heading);
+        Check(!SideAt(sd, 490, kits[k].width / 2 + 10, 150, node, off), kn + " side: a node at the piece's end");
+        SideAt(sd, 120, kits[k].width / 2 + 60, 150, node, off);
+        @startEnd = node;
+        lineWidth = kits[k].width;
+        double c = 2.2 * TurnRadius(kits[k].turns[0]) > 1500 ? 2.2 * TurnRadius(kits[k].turns[0]) : 1500;
+        Stroke({120, kits[k].width / 2, 120, kits[k].width / 2 + c, 120 + c, kits[k].width / 2 + c}, z);
+        Refit();
+        CheckChain(k, kn + " from a side");
+        Check(stopped < 0, kn + " from a side: stopped (" + fitNote + ")");
+        Check(Near(track[0].jx, 120, 1) && Near(track[0].jy, kits[k].width / 2, 1), kn + " from a side: doesn't start on it");
+        Check(track[0].ey > track[0].jy + 1 && Near(track[0].ex, track[0].jx, 1), kn + " from a side: doesn't leave it square");
+        Check(track[0].ez < z + 5, kn + " from a side: lifted over its own piece");
+        Print(kn + " from a side: " + track.length() + " pieces");
+
+        // a curve's outer side (a quarter turn around (0, 0), radius 20 m, from angle 0 to 90 degrees)
+        Side arc;
+        arc.piece = 22;
+        arc.kit = k;
+        arc.z = z;
+        arc.width = kits[k].width;
+        arc.arc = true;
+        arc.cx = 0;
+        arc.cy = 0;
+        arc.r = 2000;
+        arc.a0 = 0;
+        arc.span = 1.5707963;
+        double edge = 2000 + kits[k].width / 2;
+        found = SideAt(arc, (edge + 40) * 0.7071, (edge + 40) * 0.7071, 150, node, off);
+        Check(found && Near(node.x, edge * 0.7071, 0.1) && Near(node.y, edge * 0.7071, 0.1) && Near(node.heading, 45, 0.01),
+              kn + " curve side: the node at " + node.x + ", " + node.y + " heading " + node.heading);
+        // a line ending into that side
+        Reset(k);
+        @hoverEnd = node;
+        double far = edge + c;
+        Stroke({far * 0.7071, far * 0.7071, node.x, node.y}, z);     // coming in square to the side
+        Refit();
+        CheckChain(k, kn + " into a curve's side");
+        Placed@ last = track[track.length() - 1];
+        Check(Near(last.ex, node.x, 1) && Near(last.ey, node.y, 1), kn + " into a curve's side: doesn't end on it (" + fitNote + ")");
+        Print(kn + " into a curve's side: " + track.length() + " pieces (" + fitNote + ")");
+    }
+
     // over a Track M lying across the line at the line's height: bridged, clear of it
     Reset(k);
     Obstacle o;

@@ -188,6 +188,15 @@ Round's ramps are its double-height dome, and no kit has a crest (a downward ben
   (they were all made again every 2 s). Measured in a slot: no window builds while drawing; a 51-piece line placed in
   111 ms.
 
+## Side nodes (0.6.0, 2026-10-25)
+
+The sides of every level piece of a kit (a straight's two edges, a turn's inner and outer arcs) are nodes where the
+cursor is near one: the point on the edge nearest it (within 30% of the width, 1.5 m at least, of the edge, not within
+30 cm of an end), facing straight out of the piece. It follows the cursor (one node, moved, not made again). A line
+from it leaves the side square to it, as a T, with the piece's width; a line can end into a side the same way. End
+and join nodes win when as near. Offline: a straight's side node and a line from it, a turn's outer side and a line
+into it, all kits. In a slot: the node on the edge, following the cursor; a line drawn from it built as a T.
+
 ## Nodes (city builders' road tools as the model)
 
 While the pencil is on, every open end (level, of any track piece with two track ends: ends.txt, 28 pieces) shows as

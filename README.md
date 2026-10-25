@@ -17,7 +17,8 @@ in the track editor and track pieces drop into place along it.
   kits round them with short pieces a few degrees apart.
 - Draw back to where a line started and it closes into a loop, its last piece running into its first.
 - Near the cursor, the joins between pieces show too (small white balls): start on one to branch off the track the way
-  you draw, or end on one to merge in. Page Up / Page Down over a node sets how high the line from it goes.
+  you draw, or end on one to merge in. Near the side of a piece, a node on its edge follows the cursor: a line from it
+  leaves the side square to it (a T), or ends into it. Page Up / Page Down over a node sets how high the line from it goes.
 - Lines are as few pieces as their shape allows (a straightaway is one piece) and drop into place in a wave. Where it would pass through a piece already there, it ramps up over it
   as a bridge; if it can't climb in time, the rest shows red and says to raise the level or go round.
 - **Kit** (the menu's list): **Track**, **Bevel Half**, **Bevel Full** or **Round**. A line started on a node is that
