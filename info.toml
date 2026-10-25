@@ -1,6 +1,6 @@
 [meta]
 name = "Draw Track"
-version = "0.3.0"
+version = "0.3.1"
 author = "AnythingGoes"
 description = "Draw a line in the track editor and track pieces fall into place along it: straights, curves and slopes in Track, Bevel Half, Bevel Full or Round, joined to the track already there, in one undo step."
 min_host = "0.31.0"

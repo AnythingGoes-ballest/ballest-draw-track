@@ -136,6 +136,14 @@ Round's ramps are its double-height dome, and no kit has a crest (a downward ben
   its place in plan and only rises.
 - Measured in a slot (agent pipe, map `test`): a 6 m climb and drop drawn with Page Up / Page Down built 30 pieces in a
   straight line, a Curve1 S sag at each foot, rounded tops.
+- 0.3.1 (the user's reports): scrolling the level while drawing with the mouse still now changes the outline at once:
+  the line's open end is at the scrolled level and the line leads up (or down) to it as steep as 45 degrees allows (the
+  nearly-level end run is only kept next to a node the line joins or starts from). Heights drawn in steps (the wheel
+  turned while drawing) left short grades at the foot, each too short for a sag, so the bend came out as a run of short
+  pieces: two bends the same way with a grade under 6 m between them now merge into one where the grades either side
+  meet (only where it still clears every need), and a sliver of straight under 60 cm next to a bend of short pieces is
+  taken up by that bend. Measured in a slot: 8 m scrolled with the mouse still, the outline rose to the cursor at once,
+  and the line built with a Curve1 L at the foot.
 
 ## Nodes (city builders' road tools as the model)
 

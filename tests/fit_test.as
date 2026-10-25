@@ -205,6 +205,33 @@ void Lines(int k)
     Print(kn + " climb: " + track.length() + " pieces, up " + formatFloat(top - z, "", 0, 1) + " cm, steepest "
           + formatFloat(steepest, "", 0, 1) + " degrees, " + sagCount + " sags");
 
+    // the level scrolled up 3 m at the cursor without moving it (only the newest point is higher): the line's end
+    // rises to it at once, the line leading up to it
+    Reset(k);
+    Stroke({0, 0, 4000, 0}, z);
+    lz[lz.length() - 1] = z + 300;
+    Refit();
+    CheckChain(k, kn + " scrolled at the end");
+    double endRise = track[track.length() - 1].ez - z;
+    Check(Near(endRise, 300, 5), kn + " scrolled at the end: the end rose " + formatFloat(endRise, "", 0, 1) + " cm");
+    Print(kn + " scrolled at the end: the end rose " + formatFloat(endRise, "", 0, 1) + " cm");
+
+    // a climb drawn in steps, as the wheel turned while drawing gives it (2 m up every 3 m, 15 m in all): one bend at
+    // the foot, a sag where the kit has them (the steps' short grades merged), not a run of short pieces
+    Reset(k);
+    Stroke({0, 0, 8000, 0}, z);
+    for (uint i = 0; i < lz.length(); i++)
+        if (lx[i] >= 2000)
+            lz[i] = z + 200 * (int((lx[i] < 5000 ? lx[i] : 5000) - 2000) / 300 + 1);
+    Refit();
+    CheckChain(k, kn + " steps");
+    int footPieces = 0;
+    for (uint i = 0; i < track.length() && !kit[track[i].piece].sag && track[i].pitch < 30; i++)
+        if (track[i].pitch > 0.5)
+            footPieces++;
+    Check(kits[k].sags.length() == 0 || (sagCount >= 1 && footPieces == 0), kn + " steps: " + sagCount + " sags, " + footPieces + " short pieces at the foot");
+    Print(kn + " steps: " + track.length() + " pieces, " + sagCount + " sags");
+
     // over a Track M lying across the line at the line's height: bridged, clear of it
     Reset(k);
     Obstacle o;

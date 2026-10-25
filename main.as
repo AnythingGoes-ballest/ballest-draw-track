@@ -1257,6 +1257,8 @@ const double kGradeTolerance = 150;     // cm: the heights are simplified to gra
 const double kKink = 5;                 // degrees: the most one joint between two short pieces bends
 const double kMinBend = 1.5;            // degrees: a bend smaller than this is just a joint
 const double kKinkRadius = 2000;        // cm: the largest circle a bend made of short pieces follows
+const double kMinStraight = 60;         // cm: a straight shorter than this between bends is taken up by one
+const double kShortGrade = 600;         // cm in plan: a grade this short between two bends the same way is merged away
 const double kTooTall = 1500;           // cm: higher than this above the line, an obstacle isn't bridged
 
 array<Joint@> joints;
@@ -1457,8 +1459,8 @@ int skipFrom = -1, skipTo = -1;         // the pieces the line starts from and j
 array<Obstacle@> ownObstacles;
 
 // The heights: the drawn ones (as steep as drawn, up to kSlope), raised where something is in the way with ramps of
-// kBridgeSlope towards those, level turns; the runs next to a turn or the line's ends nearly level (kEdgeSlope), so
-// the bend onto a slope has room there. The start fixed (and the end, when joining one). Joints that can't be raised
+// kBridgeSlope towards those, level turns; the runs next to a turn or a node the line starts from or joins nearly
+// level (kEdgeSlope), so the bend onto a slope has room there. The start fixed (and the end, when joining one). Joints that can't be raised
 // enough in time are blocked. The start is fixed only when the line carries on a node; a line started in open space
 // rises from its first piece when it has to. The bends between slopes are made by the pieces (Pieces).
 void Profile(double startZ, bool fixedStart, double endZ, bool fixedEnd)
@@ -1477,28 +1479,43 @@ void Profile(double startZ, bool fixedStart, double endZ, bool fixedEnd)
             if (reach > joints[k].z)
                 joints[k].z = reach;
         }
+    // a line's open end is at the level it was drawn to (scrolled to at the cursor, say): the line leads up (or down)
+    // to it as steep as kSlope allows, never below what it has to clear
+    if (!fixedEnd)
+        for (int k = int(n) - 2; k >= 0; k--)
+        {
+            double reach = g * (joints[n - 1].s - joints[k].s);
+            double z = joints[k].z;
+            if (z < joints[n - 1].z - reach)
+                z = joints[n - 1].z - reach;
+            if (z > joints[n - 1].z + reach)
+                z = joints[n - 1].z + reach;
+            joints[k].z = z > joints[k].need ? z : joints[k].need;
+        }
     if (fixedStart || joints[0].z < startZ)
         joints[0].z = startZ;
     if (fixedEnd)
         joints[n - 1].z = endZ;
     // no steeper than the slope, from the start (and back from a fixed end)
     for (uint k = 1; k < n; k++)
-        Clamp(joints[k], joints[k - 1], EdgeRun(k - 1) ? ge : g);
+        Clamp(joints[k], joints[k - 1], EdgeRun(k - 1, fixedStart, fixedEnd) ? ge : g);
     if (fixedEnd)
     {
         joints[n - 1].z = endZ;
         for (int k = int(n) - 2; k > 0; k--)
-            Clamp(joints[k], joints[k + 1], EdgeRun(uint(k)) ? ge : g);
+            Clamp(joints[k], joints[k + 1], EdgeRun(uint(k), fixedStart, fixedEnd) ? ge : g);
     }
     for (uint k = 0; k < n; k++)
         if (joints[k].z < joints[k].need - 5)
             joints[k].blocked = true;
 }
 
-// Whether the run from joint k to k + 1 is next to a turn or the line's ends.
-bool EdgeRun(uint k)
+// Whether the run from joint k to k + 1 is next to a turn, or next to a node the line starts from or joins (a line's
+// open end is free: the level changed while drawing shows there at once, as far as kSlope reaches).
+bool EdgeRun(uint k, bool fromNode, bool toNode)
 {
-    return k == 0 || k + 2 >= joints.length() || (k > 0 && joints[k - 1].turn) || joints[k + 1].turn;
+    return (k == 0 && fromNode) || (k + 2 >= joints.length() && toNode) || (k > 0 && joints[k - 1].turn) ||
+           joints[k + 1].turn;
 }
 
 void Clamp(Joint@ j, Joint@ prev, double g)
@@ -1614,6 +1631,7 @@ void BuildLeg(uint k0, uint k1, double x, double y, double z, double heading, do
             vs.insertLast(js[i]);
             vz.insertLast(jz[i]);
         }
+    MergeShortGrades(vs, vz, js, jneed);
     int m = int(vs.length()) - 1;          // grades
     array<double> th(m), len(m);
     for (int i = 0; i < m; i++)
@@ -1663,6 +1681,27 @@ void BuildLeg(uint k0, uint k1, double x, double y, double z, double heading, do
                 radius[v] = r;
                 t[v] = reach;
             }
+        }
+    }
+    // a straight left shorter than kMinStraight between bends (a sliver of a piece) is taken up by a bend of short
+    // pieces beside it: its circle grows, when its other grade has the room
+    for (int i = 0; i < m; i++)
+    {
+        double left = len[i] - t[i] - t[i + 1];
+        if (left <= 0.5 || left >= kMinStraight)
+            continue;
+        for (int side = 0; side < 2; side++)
+        {
+            int v = side == 0 ? i + 1 : i;
+            if (v < 1 || v > m - 1 || kinks[v] == 0)
+                continue;
+            int o = side == 0 ? i + 1 : i - 1;
+            double after = len[o] - t[o] - t[o + 1] - left;
+            if (after < -0.01 || (after > 0.5 && after < kMinStraight))
+                continue;
+            t[v] += left;
+            radius[v] = t[v] / Math::tan(Math::abs(th[v] - th[v - 1]) / 2);
+            break;
         }
     }
     // the pieces, in order; the rolling line they make in the leg's frame, to check the needs against
@@ -1738,6 +1777,47 @@ void BuildLeg(uint k0, uint k1, double x, double y, double z, double heading, do
                 }
                 break;
             }
+    }
+}
+
+// Two bends the same way with only a short grade between them (drawn heights in steps: the wheel turned while drawing)
+// become one bend where the grades either side meet, so it is big enough for a sag or one smooth bend of short
+// pieces, not two cramped ones. Only where the merged line still clears every joint's need.
+void MergeShortGrades(array<double>@ vs, array<double>@ vz, array<double>@ js, array<double>@ jneed)
+{
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        for (int i = 1; i + 2 < int(vs.length()) && !changed; i++)
+        {
+            if (vs[i + 1] - vs[i] >= kShortGrade)
+                continue;
+            double g0 = (vz[i] - vz[i - 1]) / (vs[i] - vs[i - 1]);
+            double g1 = (vz[i + 1] - vz[i]) / (vs[i + 1] - vs[i]);
+            double g2 = (vz[i + 2] - vz[i + 1]) / (vs[i + 2] - vs[i + 1]);
+            if ((g1 - g0) * (g2 - g1) <= 0 || Math::abs(g2 - g0) < 1e-6)
+                continue;
+            // where the grade before and the grade after meet
+            double s = (vz[i + 1] - g2 * vs[i + 1] - vz[i] + g0 * vs[i]) / (g0 - g2);
+            if (s <= vs[i - 1] + 1 || s >= vs[i + 2] - 1)
+                continue;
+            double z = vz[i] + g0 * (s - vs[i]);
+            bool clear = true;
+            for (uint k = 0; k < js.length() && clear; k++)
+                if (js[k] > vs[i - 1] && js[k] < vs[i + 2] && jneed[k] > -1e17)
+                {
+                    double h = js[k] < s ? vz[i - 1] + g0 * (js[k] - vs[i - 1]) : z + g2 * (js[k] - s);
+                    clear = h >= jneed[k] - 1;
+                }
+            if (!clear)
+                continue;
+            vs.removeAt(uint(i + 1));
+            vz.removeAt(uint(i + 1));
+            vs[i] = s;
+            vz[i] = z;
+            changed = true;
+        }
     }
 }
 
