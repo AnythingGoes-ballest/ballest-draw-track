@@ -172,6 +172,25 @@ def main():
     (PLUGIN / "kit.txt").write_text(NL.join(lines) + NL, encoding="utf-8")
     (PLUGIN / "ends.txt").write_text(NL.join(rows) + NL, encoding="utf-8")
 
+    # the banking wall for turns: the quarter pipe's curve (a curved wall with no floor, its lip along the outside of a
+    # turn): its arc's centre (a circle fitted through its points at the floor), the lip's radius (its innermost
+    # point) and height (the top of the lip's edge, where the ball rides onto it), and the angles its arc covers
+    name = "Quarter Curve Large"
+    P, T = sk.load_mesh(pieces[name], meshes)
+    low = P[P[:, 2] < 15][:, :2]
+    A = np.column_stack([2 * low[:, 0], 2 * low[:, 1], np.ones(len(low))])
+    cx, cy, c = np.linalg.lstsq(A, (low ** 2).sum(1), rcond=None)[0]
+    r = np.hypot(P[:, 0] - cx, P[:, 1] - cy)
+    lip = float(r.min())
+    lip_top = float(P[r < lip + 15, 2].max())
+    ang = np.degrees(np.arctan2(low[:, 1] - cy, low[:, 0] - cx))
+    mid = float(np.round((ang.min() + ang.max()) / 2))
+    a0, a1 = mid - 45, mid + 45                     # a quarter turn (its ends' faces: measured -90 between them)
+    bank = ["# Draw Track banking wall: class path|arc centre x y|lip radius|lip top z|arc from to (degrees) (cm, scale 1)",
+            f"{pieces[name]['classPath']}|{cx:.1f} {cy:.1f}|{lip:.1f}|{lip_top:.1f}|{a0:g} {a1:g}"]
+    (PLUGIN / "bank.txt").write_text(NL.join(bank) + NL, encoding="utf-8")
+    print(f"bank.txt: {name}, centre ({cx:.1f}, {cy:.1f}), lip {lip:.1f} at {lip_top:.1f}, arc {a0:g}..{a1:g}")
+
     boxes = ["# Draw Track piece boxes: class name|centre x y z|half size x y z (cm, the piece's own frame, scale 1)"]
     for p in data["pieces"]:
         main = next((c for c in p.get("meshComponents", []) if c.get("name") == "Main" and c.get("mesh")), None)

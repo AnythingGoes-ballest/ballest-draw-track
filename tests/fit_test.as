@@ -25,6 +25,7 @@ void Stroke(array<double>@ corners, double z)
     lx.resize(0);
     ly.resize(0);
     lz.resize(0);
+    lw.resize(0);
     for (uint i = 0; i + 3 < corners.length(); i += 2)
     {
         double ax = corners[i], ay = corners[i + 1], bx = corners[i + 2], by = corners[i + 3];
@@ -64,7 +65,7 @@ void WorldEnd(Placed@ p, bool exitEnd, double &out x, double &out y, double &out
 
 bool Finite(double v) { return v == v && Math::abs(v) < 1e12; }
 
-int sagCount = 0, crestCount = 0;
+int sagCount = 0, crestCount = 0, cramped = 0;     // cramped: joints bending more than kKink (a bend short of room)
 double steepest = 0;
 
 // The track just fitted: all of kit `k`, joined end to end. Returns how many turns it has.
@@ -109,9 +110,19 @@ int CheckChain(int k, const string &in name)
             while (d < -180) d += 360;
             Check(Math::abs(d) < 0.5, at + ": heading off by " + formatFloat(d, "", 0, 2) + " degrees");
             double kink = Deg(Math::asin(-idz)) - Deg(Math::asin(pdz));
-            Check(Math::abs(kink) <= kKink + 0.1, at + ": slope changes " + formatFloat(kink, "", 0, 1) + " degrees");
+            Check(Math::abs(kink) <= kMaxKink + 0.1, at + ": slope changes " + formatFloat(kink, "", 0, 1) + " degrees");
+            if (Math::abs(kink) > kKink + 0.1)
+                cramped++;
         }
         WorldEnd(p, true, px, py, pz, pdx, pdy, pdz);
+    }
+    // the line's ends are level (nodes a line can carry on or join)
+    if (track.length() > 0)
+    {
+        double x, y, z, dx, dy, dz;
+        WorldEnd(track[0], false, x, y, z, dx, dy, dz);
+        Check(Math::abs(dz) < 0.01, name + ": its start isn't level (" + formatFloat(Deg(Math::asin(dz)), "", 0, 1) + " degrees)");
+        Check(Math::abs(pdz) < 0.01, name + ": its end isn't level (" + formatFloat(Deg(Math::asin(pdz)), "", 0, 1) + " degrees)");
     }
     return turnCount;
 }
@@ -125,11 +136,15 @@ void Reset(int k)
     lineWidth = -1;
     widthSetting = (500 - kMinWidth) / (kMaxWidth - kMinWidth);     // 5 m
     obstacles.resize(0);
+    liftOver = false;
+    banked = false;
 }
 
 void Tables()
 {
     ParseTables(TestRead("kit.txt"), TestRead("bounds.txt"), TestRead("ends.txt"));
+    ParseBank(TestRead("bank.txt"));
+    Check(bankClass != "" && Near(bankLip, 1019.2, 1) && Near(bankA1 - bankA0, 90, 0.01), "bank.txt");
     Check(kits.length() == 4, "4 kits, not " + kits.length());
     array<string> names = {"Track", "Bevel Half", "Bevel Full", "Round"};
     array<double> depths = {100, 125, 235, 149.6};
@@ -169,7 +184,67 @@ void Lines(int k)
     int turns1 = CheckChain(k, kn + " L");
     Check(turns1 == 1, kn + " L: " + turns1 + " turns");
     Check(stopped < 0, kn + " L: stopped");
+    Check(track.length() == 3, kn + " L: " + track.length() + " pieces (a straight, the turn, a straight)");
     Print(kn + " L: " + track.length() + " pieces, " + turns1 + " turn" + (fitNote != "" ? " (" + fitNote + ")" : ""));
+
+    // banked: the L's turn gets a wall, its lip on the turn's outer edge at the track's height, over the turn's quarter
+    Reset(k);
+    banked = true;
+    Stroke({0, 0, 4000, 0, 4000, 4000}, z);
+    Refit();
+    Check(banks.length() == 1, kn + " banked L: " + banks.length() + " walls");
+    if (banks.length() == 1)
+    {
+        Placed@ turn = null;
+        for (uint i = 0; i < track.length(); i++)
+            if (kit[track[i].piece].turn)
+                @turn = track[i];
+        double cx, cy, r;
+        TurnCentre(turn, cx, cy, r);
+        double outer = r + kit[turn.piece].width * turn.sy / 2;
+        Placed@ b = banks[0];
+        // the lip's two ends in the world (the wall's own frame: its centre plus the lip's radius at its arc's ends)
+        for (int e = 0; e < 2; e++)
+        {
+            double a = Rad(e == 0 ? bankA0 : bankA1);
+            double lx = (bankCx + bankLip * Math::cos(a)) * b.sx, ly = (bankCy + bankLip * Math::sin(a)) * b.sy;
+            double c = Math::cos(Rad(b.yaw)), sn = Math::sin(Rad(b.yaw));
+            double wx = b.x + lx * c - ly * sn, wy = b.y + lx * sn + ly * c;
+            double dj = Math::sqrt((wx - cx) * (wx - cx) + (wy - cy) * (wy - cy));
+            Check(Near(dj, outer, 1), kn + " banked L: the lip's end " + e + " is " + formatFloat(dj - outer, "", 0, 1) + " cm off the outer edge");
+            double ang = Math::atan2(wy - cy, wx - cx);
+            double aj = Math::atan2(turn.jy - cy, turn.jx - cx), ae = Math::atan2(turn.ey - cy, turn.ex - cx);
+            Check(Math::cos(ang - aj) > 0.9999 || Math::cos(ang - ae) > 0.9999, kn + " banked L: the lip's end " + e + " isn't at the turn's end");
+        }
+        Check(Near(b.z + bankLipTop * b.sz, turn.jz, 0.1), kn + " banked L: the lip's top at " + formatFloat(b.z + bankLipTop - turn.jz, "", 0, 1) + " cm from the track");
+        Print(kn + " banked L: wall scale " + formatFloat(b.sx, "", 0, 2));
+    }
+    banked = false;
+
+    // the width changed while drawing: the first leg 5 m wide, then 7.5 m from the corner on: the second straight
+    // that wide (and joined on its centre line); the first 5 m
+    Reset(k);
+    Stroke({0, 0, 4000, 0, 4000, 4000}, z);
+    for (uint i = 0; i < lx.length(); i++)
+        lw.insertLast(lx[i] < 3999 ? kits[k].width : kits[k].width * 1.5);
+    Refit();
+    CheckChain(k, kn + " widened");
+    Placed@ widestFirst = track[0], widestLast = track[track.length() - 1];
+    Check(Near(widestFirst.sy * kit[widestFirst.piece].width, kits[k].width, 1), kn + " widened: the first piece " + widestFirst.sy * kit[widestFirst.piece].width + " cm wide");
+    Check(Near(widestLast.sy * kit[widestLast.piece].width, kits[k].width * 1.5, 1), kn + " widened: the last piece " + widestLast.sy * kit[widestLast.piece].width + " cm wide");
+    lw.resize(0);
+
+    // widened along a straight: one straight drawn 5 m wide for its first 40 m, 7.5 m after: two parts, joined
+    Reset(k);
+    Stroke({0, 0, 8000, 0}, z);
+    for (uint i = 0; i < lx.length(); i++)
+        lw.insertLast(lx[i] < 4000 ? kits[k].width : kits[k].width * 1.5);
+    Refit();
+    CheckChain(k, kn + " widened along a straight");
+    Check(Near(track[0].sy * kit[track[0].piece].width, kits[k].width, 1) &&
+          Near(track[track.length() - 1].sy * kit[track[track.length() - 1].piece].width, kits[k].width * 1.5, 1),
+          kn + " widened along a straight: " + track.length() + " pieces, " + track[0].sy + " .. " + track[track.length() - 1].sy);
+    lw.resize(0);
 
     // a zigzag: four turns, left and right
     Reset(k);
@@ -387,6 +462,14 @@ void Lines(int k)
         found = SideAt(arc, (edge + 40) * 0.7071, (edge + 40) * 0.7071, 150, node, off);
         Check(found && Near(node.x, edge * 0.7071, 0.1) && Near(node.y, edge * 0.7071, 0.1) && Near(node.heading, 45, 0.01),
               kn + " curve side: the node at " + node.x + ", " + node.y + " heading " + node.heading);
+        // drawing from a node heading 45 (a line at 45 degrees): the cursor by the side at 60 degrees, the node goes
+        // where the side faces a quarter of 45 (here 45 itself); from a node heading 0, none mid-curve (the curve's
+        // quarters are its ends, already nodes)
+        OpenEnd snappedNode;
+        bool snapped = SideAt(arc, (edge + 40) * 0.5, (edge + 40) * 0.866, 150, snappedNode, off, 45);
+        Check(snapped && Near(snappedNode.heading, 45, 0.01) && Near(snappedNode.x, edge * 0.7071, 0.1),
+              kn + " curve side, snapped to 45: " + snapped + " heading " + snappedNode.heading);
+        Check(!SideAt(arc, (edge + 40) * 0.5, (edge + 40) * 0.866, 150, snappedNode, off, 0), kn + " curve side, snapped to 0: a node mid-curve");
         // a line ending into that side
         Reset(k);
         @hoverEnd = node;
@@ -399,8 +482,10 @@ void Lines(int k)
         Print(kn + " into a curve's side: " + track.length() + " pieces (" + fitNote + ")");
     }
 
-    // over a Track M lying across the line at the line's height: bridged, clear of it
+    // over a Track M lying across the line at the line's height: with "lift over crossings" on, bridged, clear of it;
+    // with it off (the default), the line stays at the level drawn
     Reset(k);
+    liftOver = true;
     Obstacle o;
     o.piece = 1;
     o.x = 4000;
@@ -433,6 +518,12 @@ void Lines(int k)
     Check(stopped < 0, kn + " crossing: stopped (" + fitNote + ")");
     Check(clear >= 150, kn + " crossing: " + formatFloat(clear, "", 0, 1) + " cm under the bridge");
     Print(kn + " crossing: " + track.length() + " pieces, " + formatFloat(clear, "", 0, 1) + " cm clear under it (" + fitNote + ")");
+    liftOver = false;
+    Refit();
+    double highest = -1e9;
+    for (uint i = 0; i < track.length(); i++)
+        highest = track[i].ez > highest ? track[i].ez : highest;
+    Check(Near(highest, z, 1), kn + " crossing, lift off: rose " + formatFloat(highest - z, "", 0, 1) + " cm");
 
     // joining a node of its own kit: an end facing back at the line's end, 40 m along and 20 m across
     Reset(k);

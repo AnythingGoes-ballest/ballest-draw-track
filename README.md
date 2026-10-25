@@ -19,11 +19,15 @@ in the track editor and track pieces drop into place along it.
 - Near the cursor, the joins between pieces show too (small white balls): start on one to branch off the track the way
   you draw, or end on one to merge in. Near the side of a piece, a node on its edge follows the cursor: a line from it
   leaves the side square to it (a T), or ends into it. Page Up / Page Down over a node sets how high the line from it goes.
-- Lines are as few pieces as their shape allows (a straightaway is one piece) and drop into place in a wave. Where it would pass through a piece already there, it ramps up over it
+- Lines are as few pieces as their shape allows (a straightaway is one piece) and drop into place in a wave.
+- A line stays at the level you draw it; tick **lift over track it crosses** in the menu to have it bridge over
+  instead. Both ends of every line are level, so you can always carry on from them. Where it would pass through a piece already there, it ramps up over it
   as a bridge; if it can't climb in time, the rest shows red and says to raise the level or go round.
 - **Kit** (the menu's list): **Track**, **Bevel Half**, **Bevel Full** or **Round**. A line started on a node is that
   node's kit (the menu switches to it); a line joins only nodes of its own kit (the others show small and grey).
   Round has one curve, a wide one (12.7 m at 5 m wide), so its turns are smoothed more.
-- **Width** (2.5 to 10 m) sets the track's width. A **right click** while drawing drops the line.
+- **Width** (2.5 to 10 m) sets the track's width; **[** and **]** (or **Ctrl + wheel**) change it as you draw, 50 cm a
+  step. A **right click** while drawing drops the line.
+- **Banked curves** (in the menu) puts a quarter pipe wall along the outside of every turn.
 
 Needs Draw Core (installed with it) and host 0.31.0. See [DESIGN.md](DESIGN.md) for how the line is fitted.

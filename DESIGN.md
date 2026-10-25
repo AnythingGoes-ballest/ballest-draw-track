@@ -197,6 +197,31 @@ from it leaves the side square to it, as a T, with the piece's width; a line can
 and join nodes win when as near. Offline: a straight's side node and a line from it, a turn's outer side and a line
 into it, all kits. In a slot: the node on the edge, following the cursor; a line drawn from it built as a T.
 
+## Level ends, no lifting by default, curve sides (0.7.0, 2026-10-25, the user's report)
+
+- **Level ends**: a line's first and last runs are level, so every line's ends are nodes (a line from open space could
+  start or end on a slope, and only level ends are nodes: the user's far-left end had none). A bend next to them may
+  use only half of such a run (the rest stays a level straight); a bend short of room uses fewer, longer pieces (no
+  shorter than 60 cm, up to 12 degrees apart; 5 normally). Corners with the same grade either side are dropped, so a
+  straight stays one piece.
+- **Lifting is an option, off by default** (the user: "by default it should stay at the same height unless the user
+  changes height"): the menu's "lift over track it crosses". Off, a line keeps the level drawn and passes through what
+  it crosses; on, it bridges over as before.
+- **Curve sides while drawing from a node**: the kit only turns by quarters, so a line can only meet a curve's side
+  where that side faces a quarter of the line's start; the side node snaps to the nearest such place (a quarter curve
+  square to the line has none mid-curve: its ends are nodes already).
+
+- **Banked curves** (the menu's "banked curves", off by default; the user chose the quarter pipe curves as the banked
+  pieces): every turn also gets a Quarter Curve Large (a curved wall with no floor) along its outside. bank.txt
+  (make_tables.py, from its geometry): its arc's centre (-0.2, -1269.2), its lip's radius 1019.2 at 100 cm high (a
+  track's thickness), its arc 45 to 135 degrees. It is centred on the turn's centre, turned onto the turn's quarter
+  and scaled in plan so the lip runs along the turn's outer edge, at the track's height (height scale 1: the wall
+  stays 368 cm). Offline: the lip's ends on the outer edge at the turn's ends, every kit; in a slot, the wall rises
+  from the turn's outside edge. In the same paste as the line (one undo step).
+- **The width as the line is drawn**: [ and ] (or Ctrl + wheel) change the width 50 cm a step, while drawing too.
+  Each point keeps the width it was drawn with: a turn is sized for the width at its corner, a straight splits where
+  the width changes (each part its own width; there is no tapering piece, so the change is a step at that join).
+
 ## Nodes (city builders' road tools as the model)
 
 While the pencil is on, every open end (level, of any track piece with two track ends: ends.txt, 28 pieces) shows as

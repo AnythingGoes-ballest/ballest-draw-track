@@ -109,6 +109,7 @@ array<Box@> boxList;
 class Placed
 {
     int piece;
+    string cls;                 // a piece not of the kit (a turn's banking wall): its class path
     bool viaB;                  // entered by end B (a turn the other way)
     double x, y, z;             // the piece's location
     double pitch, yaw;          // degrees
@@ -153,7 +154,7 @@ array<Side@> sides;
 // The node on side s nearest the plan point (px, py), when the point is near one of its edges (within reach, cm) and
 // not by its ends: written into node (the edge point, facing out of the piece); false if none. `off` gets how far the
 // point is from the edge.
-bool SideAt(Side@ s, double px, double py, double reach, OpenEnd@ node, double &out off)
+bool SideAt(Side@ s, double px, double py, double reach, OpenEnd@ node, double &out off, double frame = -1e9)
 {
     off = 1e30;
     double hw = s.width / 2;
@@ -180,7 +181,16 @@ bool SideAt(Side@ s, double px, double py, double reach, OpenEnd@ node, double &
         double vx = px - s.cx, vy = py - s.cy, d = Math::sqrt(vx * vx + vy * vy);
         if (d < 1)
             return false;
-        double ang = Math::atan2(vy, vx) - s.a0;
+        double theta = Math::atan2(vy, vx);
+        bool snapped = frame > -1e8;
+        if (snapped)
+        {
+            // the line's pieces only turn by quarters: on a curve it can only meet the side where the side faces a
+            // way square to the line's start, the nearest such place to the cursor
+            double f = Rad(frame);
+            theta = f + 1.5707963 * Math::floor((theta - f) / 1.5707963 + 0.5);
+        }
+        double ang = theta - s.a0;
         while (ang > 3.14159265) ang -= 6.2831853;
         while (ang < -3.14159265) ang += 6.2831853;
         double along = s.span >= 0 ? ang : -ang, total = Math::abs(s.span), margin = kSideEndMargin / s.r;
@@ -188,11 +198,14 @@ bool SideAt(Side@ s, double px, double py, double reach, OpenEnd@ node, double &
             return false;
         bool outer = d >= s.r;
         double edge = outer ? s.r + hw : s.r - hw;
-        off = Math::abs(d - edge);
-        ox = (outer ? 1 : -1) * vx / d;
-        oy = (outer ? 1 : -1) * vy / d;
-        ex = s.cx + vx / d * edge;
-        ey = s.cy + vy / d * edge;
+        double rx = Math::cos(theta), ry = Math::sin(theta);
+        ox = (outer ? 1 : -1) * rx;
+        oy = (outer ? 1 : -1) * ry;
+        ex = s.cx + rx * edge;
+        ey = s.cy + ry * edge;
+        off = Math::sqrt((px - ex) * (px - ex) + (py - ey) * (py - ey));
+        if (snapped)
+            off /= 4;                       // (the place it can meet may be a little way from the cursor)
     }
     if (off > reach)
         return false;
@@ -228,7 +241,8 @@ void FindSideNode(float mx, float my)
         if (!DrawCore_OnPlane(mx, my, s.z, px, py, pz, along))
             continue;
         double reach = s.width * 0.3 > 150 ? s.width * 0.3 : 150;
-        if (SideAt(s, px, py, reach, found, off) && off / reach < best)
+        double frame = DrawCore_State() == kStateDrawing && startEnd !is null ? startEnd.heading : -1e9;
+        if (SideAt(s, px, py, reach, found, off, frame) && off / reach < best)
         {
             best = off / reach;
             CopyEnd(found, sideNode);
@@ -259,6 +273,7 @@ class Seg
 {
     bool turn;
     double length;
+    double f = 1;               // its width scale (the width the line was drawn with there)
     int piece;
     bool viaB;
     int side;
@@ -267,12 +282,14 @@ class Seg
 
 const double kSnapPixels = 40;          // an open end this close to the cursor on screen is where a line starts/ends
 const double kHeightStep = 50;          // cm per wheel notch
+const double kWidthStep = 50;           // cm per [ / ] (or Ctrl + wheel notch)
 const double kFarthest = 40000;         // cm: the line's points no further from the camera than this
 const double kMinWidth = 250, kMaxWidth = 1000;
 // the editor's placement limits (the game's own bounds, measured): pieces outside them aren't placed
 const double kMinX = -31062, kMaxX = 30438, kMinY = -34598, kMaxY = 26902, kMinZ = -6569, kMaxZ = 177931;
 
 bool pencil = true;
+bool liftOver = false;                  // the menu's "lift over crossings": off, a line stays at the level drawn
 float widthSetting = 0.33f;             // 0..1, see TrackWidth()
 double height = -1e9;                   // the line's height: the plane's (the rolling surface's) z; unset at first
 bool heightSet = false;
@@ -297,6 +314,8 @@ UI::Slider@ widthSlider;
 UI::Text@ widthText;
 UI::Text@ heightText;
 UI::Button@ downButton;
+UI::CheckBox@ liftBox;
+UI::CheckBox@ bankBox;
 UI::Button@ upButton;
 UI::Text@ noteText;
 UI::Window@ tip;                        // the level (or the node) at the cursor
@@ -339,7 +358,37 @@ array<double>@ Numbers(const string &in text)
 void LoadTables()
 {
     ParseTables(Plugins::ReadFile("kit.txt"), Plugins::ReadFile("bounds.txt"), Plugins::ReadFile("ends.txt"));
+    ParseBank(Plugins::ReadFile("bank.txt"));
     Log::Info("ends of " + endNames.length() + " track pieces; " + kits.length() + " kits, " + kit.length() + " pieces; " + boxNames.length() + " piece boxes");
+}
+
+// The banking wall for turns (bank.txt): the quarter pipe's curve, a curved wall with no floor whose lip runs along
+// the outside of a turn. Its arc's centre, its lip's radius and height, and the angles its arc covers (its own frame).
+string bankClass;
+double bankCx, bankCy, bankLip, bankLipTop, bankA0, bankA1;
+
+void ParseBank(const string &in text)
+{
+    array<string>@ lines = text.split("\n");
+    for (uint i = 0; i < lines.length(); i++)
+    {
+        if (lines[i] == "" || lines[i].substr(0, 1) == "#")
+            continue;
+        array<string>@ f = lines[i].split("|");
+        if (f.length() < 5)
+            continue;
+        array<double>@ c = Numbers(f[1]);
+        array<double>@ a = Numbers(f[4]);
+        if (c.length() < 2 || a.length() < 2)
+            continue;
+        bankClass = f[0];
+        bankCx = c[0];
+        bankCy = c[1];
+        bankLip = parseFloat(f[2]);
+        bankLipTop = parseFloat(f[3]);
+        bankA0 = a[0];
+        bankA1 = a[1];
+    }
 }
 
 // A kit by name, made when new.
@@ -977,6 +1026,7 @@ class Leg
     int first, last;            // the points it came from
     double turnRadius;          // the turn at its end (cm), 0 for the last leg
     int turnPiece;
+    double turnScale = 1;       // that turn's width scale
 }
 
 // Points of the line in the start's frame: u along the start heading, v at +90 degrees to it.
@@ -1231,9 +1281,11 @@ array<Seg@>@ Fit(array<double>@ xs, array<double>@ ys, array<double>@ zs, double
             nextRoom = (k + 2 == legs.length() ? endAlong : 0) - Along(next.dir, cu, cv);
         int pick = -1;
         double pickR = 0;
+        double fc = ScaleAt(leg.last);          // the width drawn at this corner
+        leg.turnScale = fc;
         for (uint t = 0; t < turns.length(); t++)
         {
-            double r = TurnRadius(turns[t]) * f;
+            double r = TurnRadius(turns[t]) * fc;
             if (r > len - prevRadius + 0.5 || r > nextRoom + 0.5)
                 continue;
             if (pick < 0 || Math::abs(r - drawnRadius) < Math::abs(pickR - drawnRadius))
@@ -1246,7 +1298,7 @@ array<Seg@>@ Fit(array<double>@ xs, array<double>@ ys, array<double>@ zs, double
         {
             // no turn fits: the smallest, with this leg made long enough for it (the next leg's line moves out)
             pick = turns[0];
-            pickR = rs;
+            pickR = TurnRadius(turns[0]) * fc;
             double need = prevRadius + pickR - len;
             if (need > 0 && endDir >= 0 && k + 2 == legs.length())
                 endDir = -1;            // the leg into the end it is to join can't move: no join
@@ -1289,17 +1341,41 @@ array<Seg@>@ Fit(array<double>@ xs, array<double>@ ys, array<double>@ zs, double
         }
         else
             lenAlong = endAlong - Along(leg.dir, su, sv);
+        // the straight, in parts where the width drawn along it changes (each part its own width)
+        double from = Along(leg.dir, su, sv) + prevRadius, to = from + (lenAlong - prevRadius - leg.turnRadius);
+        int lastPoint = hasTurn ? legs[k + 1].first : n - 1;
+        double partFrom = from;
+        double partScale = ScaleAt(leg.first);
+        for (int i = leg.first + 1; i <= lastPoint && lw.length() > 0; i++)
+        {
+            if (ScaleAt(i) == ScaleAt(i - 1))
+                continue;
+            double at = Along(leg.dir, pu[i], pv[i]);
+            if (at <= partFrom + 1 || at >= to - 1)
+                continue;
+            Seg part;
+            part.turn = false;
+            part.length = at - partFrom;
+            part.f = partScale;
+            part.first = leg.first;
+            part.last = i;
+            segs.insertLast(part);
+            partFrom = at;
+            partScale = ScaleAt(i);
+        }
         Seg straight;
         straight.turn = false;
-        straight.length = lenAlong - prevRadius - leg.turnRadius;
+        straight.length = to - partFrom;
+        straight.f = partFrom > from ? partScale : ScaleAt(leg.first);
         straight.first = leg.first;
-        straight.last = hasTurn ? legs[k + 1].first : n - 1;
+        straight.last = lastPoint;
         if (straight.length > 1 || straight.length < -1)
             segs.insertLast(straight);
         if (hasTurn)
         {
             Seg t;
             t.turn = true;
+            t.f = leg.turnScale;
             t.piece = leg.turnPiece;
             t.side = ((legs[k + 1].dir - leg.dir + 4) % 4) == 1 ? 1 : -1;
             t.viaB = TurnSide(leg.turnPiece) != t.side;
@@ -1520,6 +1596,7 @@ class Joint
     double hin;                 // the heading arriving (a turn's entry)
     int seg;                    // the segment that leaves it, -1 at the end
     bool turn = false;          // a turn leaves it
+    double f = 1;               // the width scale of what leaves it
     double target;              // the height drawn here
     double need = -1e18;        // the lowest it can be to clear what is in the way
     bool blocked = false;       // what is in the way here is too tall to bridge
@@ -1535,6 +1612,8 @@ const double kGradeTolerance = 150;     // cm: the heights are simplified to gra
 const double kKink = 5;                 // degrees: the most one joint between two short pieces bends
 const double kMinBend = 1.5;            // degrees: a bend smaller than this is just a joint
 const double kKinkRadius = 2000;        // cm: the largest circle a bend made of short pieces follows
+const double kMinChord = 60;            // cm: the shortest piece in a bend of short pieces
+const double kMaxKink = 12;             // degrees: the most such a bend's pieces turn apart when cramped
 const double kMinStraight = 60;         // cm: a straight shorter than this between bends is taken up by one
 const double kMaxStretch = 10;          // a straight piece is stretched up to this many times its length (Track M: 100 m)
 const double kShortGrade = 600;         // cm in plan: a grade this short between two bends the same way is merged away
@@ -1553,7 +1632,7 @@ void MakeJoints(array<Seg@>@ segs, double jx, double jy, double a0)
         Seg@ g = segs[k];
         if (g.turn)
         {
-            Placed@ t = Put(g.piece, g.viaB, x, y, 0, heading, 0, f, f);
+            Placed@ t = Put(g.piece, g.viaB, x, y, 0, heading, 0, g.f, g.f);
             Joint j;
             j.s = s;
             j.path = path;
@@ -1564,6 +1643,7 @@ void MakeJoints(array<Seg@>@ segs, double jx, double jy, double a0)
             j.heading = heading + g.side * 90;
             j.hin = heading;
             j.seg = int(k);
+            j.f = g.f;
             j.turn = true;
             joints.insertLast(j);
             path += 1.5707963 * Math::sqrt((t.ex - x) * (t.ex - x) + (t.ey - y) * (t.ey - y)) / 1.41421356;
@@ -1587,6 +1667,7 @@ void MakeJoints(array<Seg@>@ segs, double jx, double jy, double a0)
             j.heading = heading;
             j.hin = heading;
             j.seg = int(k);
+            j.f = g.f;
             joints.insertLast(j);
             double step = g.length / n;
             x += Math::cos(Rad(heading)) * step;
@@ -1605,6 +1686,7 @@ void MakeJoints(array<Seg@>@ segs, double jx, double jy, double a0)
     last.heading = heading;
     last.hin = heading;
     last.seg = -1;
+    last.f = segs.length() > 0 ? segs[segs.length() - 1].f : WidthScale();
     joints.insertLast(last);
     // consecutive turns (no straight between) share a joint already; a turn right after the start keeps both
 }
@@ -1747,8 +1829,8 @@ double branchClear = 0;                 // cm along the line from such a join wh
 array<Obstacle@> ownObstacles;
 
 // The heights: the drawn ones (as steep as drawn, up to kSlope), raised where something is in the way with ramps of
-// kBridgeSlope towards those, level turns; the runs next to a turn or a node the line starts from or joins nearly
-// level (kEdgeSlope), so the bend onto a slope has room there. The start fixed (and the end, when joining one). Joints that can't be raised
+// kBridgeSlope towards those (only with "lift over crossings" on), level turns; the line's first and last runs level,
+// the runs next to a turn nearly level (kEdgeSlope), so the bend onto a slope has room there. The start fixed (and the end, when joining one). Joints that can't be raised
 // enough in time are blocked. The start is fixed only when the line carries on a node; a line started in open space
 // rises from its first piece when it has to. The bends between slopes are made by the pieces (Pieces).
 void Profile(double startZ, bool fixedStart, double endZ, bool fixedEnd)
@@ -1768,11 +1850,13 @@ void Profile(double startZ, bool fixedStart, double endZ, bool fixedEnd)
                 joints[k].z = reach;
         }
     // a line's open end is at the level it was drawn to (scrolled to at the cursor, say): the line leads up (or down)
-    // to it as steep as kSlope allows, never below what it has to clear
-    if (!fixedEnd)
+    // to it as steep as kSlope allows, never below what it has to clear; its last run is level (an end a node can be
+    // made of), so the level is reached where that run starts
+    if (!fixedEnd && n >= 2)
         for (int k = int(n) - 2; k >= 0; k--)
         {
-            double reach = g * (joints[n - 1].s - joints[k].s);
+            uint last = n >= 3 ? n - 2 : n - 1;
+            double reach = uint(k) >= last ? 0 : g * (joints[last].s - joints[k].s);
             double z = joints[k].z;
             if (z < joints[n - 1].z - reach)
                 z = joints[n - 1].z - reach;
@@ -1784,26 +1868,30 @@ void Profile(double startZ, bool fixedStart, double endZ, bool fixedEnd)
         joints[0].z = startZ;
     if (fixedEnd)
         joints[n - 1].z = endZ;
-    // no steeper than the slope, from the start (and back from a fixed end)
+    // no steeper than the slope, from the start (and back from a fixed end); the line's first and last runs level
     for (uint k = 1; k < n; k++)
-        Clamp(joints[k], joints[k - 1], EdgeRun(k - 1, fixedStart, fixedEnd) ? ge : g);
+        Clamp(joints[k], joints[k - 1], RunSlope(k - 1, g, ge));
     if (fixedEnd)
     {
         joints[n - 1].z = endZ;
         for (int k = int(n) - 2; k > 0; k--)
-            Clamp(joints[k], joints[k + 1], EdgeRun(uint(k), fixedStart, fixedEnd) ? ge : g);
+            Clamp(joints[k], joints[k + 1], RunSlope(uint(k), g, ge));
     }
     for (uint k = 0; k < n; k++)
         if (joints[k].z < joints[k].need - 5)
             joints[k].blocked = true;
 }
 
-// Whether the run from joint k to k + 1 is next to a turn, or next to a node the line starts from or joins (a line's
-// open end is free: the level changed while drawing shows there at once, as far as kSlope reaches).
-bool EdgeRun(uint k, bool fromNode, bool toNode)
+// The steepest the run from joint k to k + 1 may be (a tangent): level for the line's first and last runs (its ends are
+// level: nodes a line can carry on or join; a line from open space ended sloped, and was no node), nearly level
+// (kEdgeSlope) next to a turn so the bend onto a slope has room, else kSlope.
+double RunSlope(uint k, double g, double ge)
 {
-    return (k == 0 && fromNode) || (k + 2 >= joints.length() && toNode) || (k > 0 && joints[k - 1].turn) ||
-           joints[k + 1].turn;
+    if (k == 0 || k + 2 >= joints.length())
+        return 0;
+    if ((k > 0 && joints[k - 1].turn) || joints[k + 1].turn)
+        return ge;
+    return g;
 }
 
 void Clamp(Joint@ j, Joint@ prev, double g)
@@ -1841,7 +1929,7 @@ array<Placed@>@ Pieces(array<Seg@>@ segs, double jx, double jy, double a0, int &
         Seg@ g = segs[joints[k].seg];
         if (g.turn)
         {
-            Placed@ t = Put(g.piece, g.viaB, x, y, joints[k].z, heading, 0, f, f);
+            Placed@ t = Put(g.piece, g.viaB, x, y, joints[k].z, heading, 0, g.f, g.f);
             t.pathEnd = joints[k + 1].path;
             chain.insertLast(t);
             x = t.ex;
@@ -1854,7 +1942,7 @@ array<Placed@>@ Pieces(array<Seg@>@ segs, double jx, double jy, double a0, int &
         uint end = k + 1;
         while (end < limit && !joints[end].turn)
             end++;
-        BuildLeg(k, end, x, y, z, heading, f, chain);
+        BuildLeg(k, end, x, y, z, heading, segs[joints[k].seg].f, chain);
         if (chain.length() > 0)
         {
             x = chain[chain.length() - 1].ex;
@@ -1899,6 +1987,8 @@ void KeepGrades(array<double>@ s, array<double>@ z, array<double>@ need, array<b
 // grades between the bends. Starts at (x, y, z), which is joint k0.
 void BuildLeg(uint k0, uint k1, double x, double y, double z, double heading, double f, array<Placed@>@ chain)
 {
+    legK0 = k0;
+    legK1 = k1;
     // the joints in the leg's own frame: plan distance from its start, height
     array<double> js, jz, jneed;
     for (uint k = k0; k <= k1; k++)
@@ -1911,6 +2001,11 @@ void BuildLeg(uint k0, uint k1, double x, double y, double z, double heading, do
     array<bool> keep(n);
     keep[0] = true;
     keep[n - 1] = true;
+    // the line's first and last runs are level: where they end is kept as a corner of the grades
+    if (k0 == 0 && n >= 3)
+        keep[1] = true;
+    if (k1 + 1 == joints.length() && n >= 3)
+        keep[n - 2] = true;
     KeepGrades(js, jz, jneed, keep, 0, n - 1);
     array<double> vs, vz;
     for (int i = 0; i < n; i++)
@@ -1919,6 +2014,16 @@ void BuildLeg(uint k0, uint k1, double x, double y, double z, double heading, do
             vs.insertLast(js[i]);
             vz.insertLast(jz[i]);
         }
+    // a kept corner with the same grade either side (a level end run on a level line) is no corner
+    for (int i = int(vs.length()) - 2; i >= 1; i--)
+    {
+        double before = (vz[i] - vz[i - 1]) / (vs[i] - vs[i - 1]), after = (vz[i + 1] - vz[i]) / (vs[i + 1] - vs[i]);
+        if (Math::abs(after - before) < 1e-4)
+        {
+            vs.removeAt(uint(i));
+            vz.removeAt(uint(i));
+        }
+    }
     MergeShortGrades(vs, vz, js, jneed);
     int m = int(vs.length()) - 1;          // grades
     array<double> th(m), len(m);
@@ -1940,8 +2045,11 @@ void BuildLeg(uint k0, uint k1, double x, double y, double z, double heading, do
         double bend = th[v] - th[v - 1];
         if (Math::abs(bend) < Rad(kMinBend))
             continue;
-        double room = len[v - 1] * (v - 1 == 0 ? 1 : 0.5);
-        double roomR = len[v] * (v == m - 1 ? 1 : 0.5);
+        // a bend may use all of a grade at the leg's end, but only half of the line's own level first or last run
+        // (some of it stays a level straight: the line's end is level)
+        bool lineStart = k0 == 0, lineEnd = k1 + 1 == joints.length();
+        double room = len[v - 1] * (v - 1 == 0 && !lineStart ? 1 : 0.5);
+        double roomR = len[v] * (v == m - 1 && !lineEnd ? 1 : 0.5);
         if (roomR < room)
             room = roomR;
         // upward: a sag; over the top: a crest (a ramp turned over), the largest that fits
@@ -1964,6 +2072,10 @@ void BuildLeg(uint k0, uint k1, double x, double y, double z, double heading, do
             double reach = kKinkRadius * half < room ? kKinkRadius * half : room;
             int pieces = int(Math::ceil(Math::abs(bend) / Rad(kKink)));
             double r = reach / half;
+            // a cramped bend: fewer, longer pieces (no shorter than kMinChord), up to kMaxKink apart
+            while (pieces > 2 && 2 * r * Math::sin(Math::abs(bend) / (2 * pieces)) < kMinChord &&
+                   Math::abs(bend) / (pieces - 1) <= Rad(kMaxKink))
+                pieces--;
             if (pieces >= 2 && 2 * r * Math::sin(Math::abs(bend) / (2 * pieces)) >= 20)
             {
                 kinks[v] = pieces;
@@ -2004,17 +2116,32 @@ void BuildLeg(uint k0, uint k1, double x, double y, double z, double heading, do
         double straight = len[i] - t[i] - t[i + 1];
         if (straight > 0.5)
         {
-            // as few pieces as the straight can be: one, stretched, up to kMaxStretch times the kit's longest
-            int pieces = int(Math::ceil(straight / (StraightLength(straights[straights.length() - 1]) * kMaxStretch)));
-            double piece = straight / pieces;
-            for (int q = 0; q < pieces; q++)
+            // in parts where the width changes along it; each part as few pieces as it can be: one, stretched, up
+            // to kMaxStretch times the kit's longest
+            double planFrom = (x - x0) * ux + (y - y0) * uy, planLen = straight * Math::cos(th[i]);
+            array<double> cuts = {0};
+            for (uint k = legK0 + 1; k < legK1; k++)
             {
-                int kind = StraightFor(piece);
-                Placed@ p = Put(kind, false, x, y, z, heading, Deg(th[i]), piece / StraightLength(kind), f);
-                LegPiece(p, chain, x0, y0, ux, uy, pathAt, rs, rz);
-                x = p.ex;
-                y = p.ey;
-                z = p.ez;
+                double at = joints[k].s - joints[legK0].s - planFrom;
+                if (joints[k].f != joints[k - 1].f && at > 1 && at < planLen - 1)
+                    cuts.insertLast(at);
+            }
+            cuts.insertLast(planLen);
+            for (uint c = 0; c + 1 < cuts.length(); c++)
+            {
+                double part = (cuts[c + 1] - cuts[c]) / Math::cos(th[i]);
+                double pf = LegScaleAt(planFrom + cuts[c]);
+                int pieces = int(Math::ceil(part / (StraightLength(straights[straights.length() - 1]) * kMaxStretch)));
+                double piece = part / pieces;
+                for (int q = 0; q < pieces; q++)
+                {
+                    int kind = StraightFor(piece);
+                    Placed@ p = Put(kind, false, x, y, z, heading, Deg(th[i]), piece / StraightLength(kind), pf);
+                    LegPiece(p, chain, x0, y0, ux, uy, pathAt, rs, rz);
+                    x = p.ex;
+                    y = p.ey;
+                    z = p.ez;
+                }
             }
         }
         int v = i + 1;
@@ -2022,7 +2149,7 @@ void BuildLeg(uint k0, uint k1, double x, double y, double z, double heading, do
             continue;
         if (sagAt[v] >= 0)
         {
-            Placed@ p = Put(sagAt[v], false, x, y, z, heading, Deg((th[i] + th[v]) / 2), stretch[v], f);
+            Placed@ p = Put(sagAt[v], false, x, y, z, heading, Deg((th[i] + th[v]) / 2), stretch[v], LegScaleAt((x - x0) * ux + (y - y0) * uy));
             p.curved = true;
             p.cx = x + ux * Math::cos(th[i]) * t[v];
             p.cy = y + uy * Math::cos(th[i]) * t[v];
@@ -2043,7 +2170,7 @@ void BuildLeg(uint k0, uint k1, double x, double y, double z, double heading, do
             {
                 int kind = StraightFor(chord);
                 double pitch = th[i] + bend * (q + 0.5) / kinks[v];
-                Placed@ p = Put(kind, false, x, y, z, heading, Deg(pitch), chord / StraightLength(kind), f);
+                Placed@ p = Put(kind, false, x, y, z, heading, Deg(pitch), chord / StraightLength(kind), LegScaleAt((x - x0) * ux + (y - y0) * uy));
                 LegPiece(p, chain, x0, y0, ux, uy, pathAt, rs, rz);
                 x = p.ex;
                 y = p.ey;
@@ -2113,6 +2240,17 @@ void MergeShortGrades(array<double>@ vs, array<double>@ vz, array<double>@ js, a
     }
 }
 
+// The width scale at plan distance s from the start of the leg being built (its joints' runs).
+uint legK0 = 0, legK1 = 0;
+double LegScaleAt(double s)
+{
+    double f = joints[legK0].f;
+    for (uint k = legK0; k < legK1; k++)
+        if (joints[k].s - joints[legK0].s <= s + 0.5)
+            f = joints[k].f;
+    return f;
+}
+
 // A leg's piece placed: added to the chain, and its exit to the rolling line.
 void LegPiece(Placed@ p, array<Placed@>@ chain, double x0, double y0, double ux, double uy, double pathAt,
               array<double>@ rs, array<double>@ rz)
@@ -2139,9 +2277,104 @@ array<Placed@>@ HeightsAndPieces(array<Seg@>@ segs, double jx, double jy, double
     return chain;
 }
 
+// ---------------------------------------------------------------- banked turns
+
+bool banked = false;                    // the menu's "banked curves": a wall along the outside of every turn
+array<Placed@> banks;                   // the line's turns' walls
+
+// A turn's centre in plan and its radius (to the middle of the track), from its entry, exit and the way in.
+bool TurnCentre(Placed@ p, double &out cx, double &out cy, double &out r)
+{
+    KitPiece@ k = kit[p.piece];
+    array<double>@ inEnd = p.viaB ? k.b : k.a;
+    array<double> m(9);
+    AxesRoll(p.pitch, p.yaw, p.roll, m);
+    double ix, iy, iz;
+    Apply(m, -inEnd[3], -inEnd[4], -inEnd[5], ix, iy, iz);
+    double len = Math::sqrt(ix * ix + iy * iy);
+    if (len < 1e-6)
+        return false;
+    ix /= len;
+    iy /= len;
+    r = p.length / 1.41421356;
+    // the centre: square to the way in, on the side the exit is
+    double side = -iy * (p.ex - p.jx) + ix * (p.ey - p.jy) > 0 ? 1 : -1;
+    cx = p.jx - iy * r * side;
+    cy = p.jy + ix * r * side;
+    return true;
+}
+
+// The wall for one turn: the quarter pipe's curve centred on the turn's centre, turned to cover the turn's quarter,
+// scaled in plan so its lip runs along the turn's outer edge (at the track's rolling height: its lip is a track's
+// thickness, 100 cm, as Track's).
+Placed@ BankFor(Placed@ t)
+{
+    double cx, cy, r;
+    if (bankClass == "" || !TurnCentre(t, cx, cy, r))
+        return null;
+    double width = kit[t.piece].width * t.sy;
+    double scale = (r + width / 2) / bankLip;
+    // the quarter the turn covers: from the lower of its entry's and exit's angles round the centre
+    double aj = Deg(Math::atan2(t.jy - cy, t.jx - cx)), ae = Deg(Math::atan2(t.ey - cy, t.ex - cx));
+    double d = ae - aj;
+    while (d > 180) d -= 360;
+    while (d < -180) d += 360;
+    double low = d > 0 ? aj : ae;
+    double yaw = low - bankA0;
+    double c = Math::cos(Rad(yaw)), s = Math::sin(Rad(yaw));
+    double lx = bankCx * scale, ly = bankCy * scale;
+    Placed b;
+    b.piece = -1;
+    b.cls = bankClass;
+    b.viaB = false;
+    b.x = cx - (lx * c - ly * s);
+    b.y = cy - (lx * s + ly * c);
+    b.z = t.jz - bankLipTop;
+    b.pitch = 0;
+    b.yaw = yaw;
+    b.roll = 0;
+    b.sx = scale;
+    b.sy = scale;
+    b.sz = 1;
+    b.jx = cx;                          // (for its outline: the arc's centre, its lip and outer radii)
+    b.jy = cy;
+    b.jz = t.jz;
+    b.ex = r + width / 2;
+    b.ey = low;
+    b.ez = 0;
+    return b;
+}
+
+void MakeBanks()
+{
+    banks.resize(0);
+    if (!banked)
+        return;
+    for (uint i = 0; i < track.length(); i++)
+        if (track[i].piece >= 0 && kit[track[i].piece].turn)
+        {
+            Placed@ b = BankFor(track[i]);
+            if (b !is null)
+                banks.insertLast(b);
+        }
+}
+
 // ---------------------------------------------------------------- the line, fitted
 
 array<double> lx, ly, lz;               // the line's points so far
+array<double> lw;                       // the track's width at each (cm): it can change as the line is drawn
+
+// The width scale at point i of the line (the width it was drawn with there).
+double ScaleAt(int i)
+{
+    if (lw.length() == 0)
+        return WidthScale();
+    if (i < 0)
+        i = 0;
+    if (i >= int(lw.length()))
+        i = int(lw.length()) - 1;
+    return lw[i] / kitWidth;
+}
 // where the level changed while drawing: from that point on, the points move by this much in plan (Update)
 array<int> shiftFrom;
 array<double> shiftX, shiftY;
@@ -2181,7 +2414,7 @@ bool PlanReaches(array<Seg@>@ segs, double jx, double jy, double a0, OpenEnd@ en
     {
         if (segs[k].turn)
         {
-            Placed@ t = Put(segs[k].piece, segs[k].viaB, x, y, 0, heading, 0, f, f);
+            Placed@ t = Put(segs[k].piece, segs[k].viaB, x, y, 0, heading, 0, segs[k].f, segs[k].f);
             x = t.ex;
             y = t.ey;
             heading += segs[k].side * 90;
@@ -2321,7 +2554,8 @@ void Refit()
     double ex = endAt !is null ? endAt.x : 0, ey = endAt !is null ? endAt.y : 0;
     // what is in the map, then (once) the line's own pieces as they came out: no feedback, so nothing runs away
     ownObstacles.resize(0);
-    Clearance(false, jx, jy, ex, ey);
+    if (liftOver)
+        Clearance(false, jx, jy, ex, ey);
     int stop;
     array<Placed@>@ first = HeightsAndPieces(segs, jx, jy, jz, a0, startEnd !is null || loopClosed, endAt !is null ? endAt.z : 0, joinsEnd, stop);
     for (uint i = 0; i < first.length(); i++)
@@ -2337,7 +2571,8 @@ void Refit()
         joints[k].need = -1e18;
         joints[k].blocked = false;
     }
-    Clearance(true, jx, jy, ex, ey);
+    if (liftOver)
+        Clearance(true, jx, jy, ex, ey);
     track = HeightsAndPieces(segs, jx, jy, jz, a0, startEnd !is null || loopClosed, endAt !is null ? endAt.z : 0, joinsEnd, stopped);
     if (stopped >= 0)
         fitNote = "in the way (red): raise the level (PgUp) or go round";
@@ -2360,6 +2595,7 @@ void Refit()
         if (otherKit)
             fitNote = "that end is " + KitLabel(hoverEnd.kit) + ": a line joins only its own kind";
     }
+    MakeBanks();
     // the editor's placement limits
     for (uint i = 0; i < track.length(); i++)
     {
@@ -2368,6 +2604,7 @@ void Refit()
         {
             track.resize(i);
             fitNote = "stopped at the edge of the map";
+            MakeBanks();
             break;
         }
     }
@@ -2388,7 +2625,7 @@ void ClearGhost()
 // The outline of a piece's rolling surface: its two side edges and its ends.
 void Outline(Placed@ p, array<double>@ pairs)
 {
-    double w = TrackWidth() / 2;
+    double w = kit[p.piece].width * p.sy / 2;
     double h0 = Rad(Math::atan2(p.ey - p.jy, p.ex - p.jx));
     // the heading at the entry: from the piece's own entry end
     array<double>@ inEnd = p.viaB ? kit[p.piece].b : kit[p.piece].a;
@@ -2470,6 +2707,21 @@ void ShowGhost()
     array<double> good, bad;
     for (uint i = 0; i < track.length(); i++)
         Outline(track[i], good);
+    // a banking wall: its lip (the turn's outer edge) and its top, a quarter round the turn's centre
+    for (uint i = 0; i < banks.length(); i++)
+    {
+        Placed@ b = banks[i];
+        double lip = b.ex, top = b.ex * 1.3, a = Rad(b.ey);
+        for (int q = 0; q < 8; q++)
+        {
+            double a1 = a + 1.5707963 * q / 8, a2 = a + 1.5707963 * (q + 1) / 8;
+            Pair(good, b.jx + Math::cos(a1) * top, b.jy + Math::sin(a1) * top, b.jz + 368,
+                 b.jx + Math::cos(a2) * top, b.jy + Math::sin(a2) * top, b.jz + 368);
+        }
+        Pair(good, b.jx + Math::cos(a) * lip, b.jy + Math::sin(a) * lip, b.jz, b.jx + Math::cos(a) * top, b.jy + Math::sin(a) * top, b.jz + 368);
+        double a3 = a + 1.5707963;
+        Pair(good, b.jx + Math::cos(a3) * lip, b.jy + Math::sin(a3) * lip, b.jz, b.jx + Math::cos(a3) * top, b.jy + Math::sin(a3) * top, b.jz + 368);
+    }
     if (stopped >= 0)
         for (uint k = uint(stopped); k + 1 < joints.length(); k++)
             Pair(bad, joints[k].ex, joints[k].ey, joints[k].z, joints[k + 1].x, joints[k + 1].y, joints[k + 1].z);
@@ -2487,10 +2739,13 @@ void Build()
         return;
     array<string> classes;
     array<double> transforms;
-    for (uint i = 0; i < track.length(); i++)
+    array<Placed@> all = track;
+    for (uint i = 0; i < banks.length(); i++)
+        all.insertLast(banks[i]);
+    for (uint i = 0; i < all.length(); i++)
     {
-        Placed@ p = track[i];
-        classes.insertLast(kit[p.piece].classPath);
+        Placed@ p = all[i];
+        classes.insertLast(p.cls != "" ? p.cls : kit[p.piece].classPath);
         transforms.insertLast(p.x);
         transforms.insertLast(p.y);
         transforms.insertLast(p.z);
@@ -2554,6 +2809,10 @@ void BuildMenu()
     @downButton = PlainButton(" - ");
     @upButton = PlainButton(" + ");
     menu.NewRow();
+    @liftBox = menu.AddCheckBox("lift over track it crosses", 14);
+    menu.NewRow();
+    @bankBox = menu.AddCheckBox("banked curves (a quarter pipe wall round each turn)", 14);
+    menu.NewRow();
     @noteText = menu.AddText("", 14);
     @tip = UI::CreateWindow();
     tip.SetBackground(BOX_R, BOX_G, BOX_B, 0.85f);
@@ -2573,6 +2832,8 @@ void RefreshMenu()
     pencilButton.SetBackground(pencil ? LIME_R : BUTTON_R, pencil ? LIME_G : BUTTON_G, pencil ? LIME_B : BUTTON_B, 1);
     pencilButton.SetTextColor(pencil ? 0.02f : 1, pencil ? 0.02f : 1, pencil ? 0.02f : 1, pencil ? 1 : 0.55f);
     widthSlider.value = widthSetting;
+    liftBox.checked = liftOver;
+    bankBox.checked = banked;
 }
 
 void ShowState()
@@ -2634,6 +2895,8 @@ void Main()
     UseKit(kitChoice);
     widthSetting = float(parseFloat(Storage::Get("width", "0.33")));
     pencil = Storage::Get("pencil", "true") == "true";
+    liftOver = Storage::Get("lift", "false") == "true";
+    banked = Storage::Get("banked", "false") == "true";
     BuildMenu();
     RefreshMenu();
     Editor::AddHotkey(Plugins::Folder() + "pencil.png", "draw track (pencil on/off)");
@@ -2707,6 +2970,18 @@ void Update(float dt)
         Storage::Set("pencil", pencil ? "true" : "false");
         RefreshMenu();
     }
+    if (bankBox.Changed())
+    {
+        banked = bankBox.checked;
+        Storage::Set("banked", banked ? "true" : "false");
+        fitAt = -10;
+    }
+    if (liftBox.Changed())
+    {
+        liftOver = liftBox.checked;
+        Storage::Set("lift", liftOver ? "true" : "false");
+        fitAt = -10;
+    }
     if (kitBox.Changed() && kitBox.selected >= 0 && kitBox.selected < int(kits.length()))
         ChooseKit(kitBox.selected);
     if (widthSlider.dragging || Math::abs(widthSlider.value - widthSetting) > 0.0001f)
@@ -2721,8 +2996,28 @@ void Update(float dt)
         step -= kHeightStep * 2;
     if (upButton.Clicked() || Input::Pressed(Input::PageUp))
         step += kHeightStep * 2;
-    if (drawingNow && Input::Wheel() != 0)
+    if (drawingNow && Input::Wheel() != 0 && !Input::Down(Input::Ctrl))
         step += Input::Wheel() * kHeightStep;
+    // the width, as the line is drawn too: [ and ], or Ctrl + wheel, 50 cm a step
+    double widen = 0;
+    if (!Editor::Typing() && Input::Pressed(Input::LeftBracket))
+        widen -= 1;
+    if (!Editor::Typing() && Input::Pressed(Input::RightBracket))
+        widen += 1;
+    if (Input::Down(Input::Ctrl) && Input::Wheel() != 0)
+        widen += Input::Wheel();
+    if (widen != 0)
+    {
+        double now = TrackWidth() + widen * kWidthStep;
+        now = now < kMinWidth ? kMinWidth : now > kMaxWidth ? kMaxWidth : now;
+        lineWidth = -1;                 // (a node's width carried on gives way to the one chosen)
+        widthSetting = float((now - kMinWidth) / (kMaxWidth - kMinWidth));
+        Storage::Set("width", formatFloat(widthSetting, "", 0, 3));
+        RefreshMenu();
+        if (drawingNow && lw.length() > 0)
+            lw[lw.length() - 1] = now;  // the newest point takes it now (as the level)
+        fitAt = -10;
+    }
 
     // where a line would start: an open end under the cursor, on top of a piece, or at the height used last
     float mx, my;
@@ -2828,6 +3123,7 @@ void Update(float dt)
         lx.resize(0);
         ly.resize(0);
         lz.resize(0);
+        lw.resize(0);
         shiftFrom.resize(0);
         shiftX.resize(0);
         shiftY.resize(0);
@@ -2841,6 +3137,7 @@ void Update(float dt)
             lx.resize(0);
             ly.resize(0);
             lz.resize(0);
+            lw.resize(0);
         }
         for (int i = int(lx.length()); i < n; i++)
         {
@@ -2855,6 +3152,7 @@ void Update(float dt)
                 }
             lx.insertLast(x);
             ly.insertLast(y);
+            lw.insertLast(TrackWidth());
             lz.insertLast(z);
         }
         // the plane's height changes as the line is drawn: the newest point takes the height now

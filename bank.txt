@@ -1,0 +1,2 @@
+# Draw Track banking wall: class path|arc centre x y|lip radius|lip top z|arc from to (degrees) (cm, scale 1)
+/Game/LevelEditor/PackageAssets/MultiplayerLevelEditor/ExampleObjects/BallestPieces/BP_Pipe_Quarter_Large.BP_Pipe_Quarter_Large_C|-0.2 -1269.2|1019.2|100.0|45 135
