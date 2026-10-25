@@ -106,8 +106,9 @@ def main():
     pieces = {p["name"]: p for p in data["pieces"] if p.get("inMenu")}
 
     # the kits: every piece's ends, and every pair of ends in a kit checked to meet
-    lines = ["# Draw Track kits: kit|name|class path|kind|end A: x y z dx dy dz|end B: x y z dx dy dz|width|height scale",
-             "# (ends: where the rolling surface meets the end and the end's outward direction; cm, scale 1)"]
+    lines = ["# Draw Track kits: kit|name|class path|kind|end A: x y z dx dy dz|end B: x y z dx dy dz|width|height scale|roll",
+             "# (ends: where the rolling surface meets the end and the end's outward direction; cm, scale 1, in the piece's own",
+             "# frame before its roll: a crest is a ramp rolled 180 degrees, ridden on its underside)"]
     reference = []          # (kit, its first straight's end A rolling line, face, width)
     member = {name: (kit, sz) for kit, members in KITS for name, _, sz in members}
     failed = False
@@ -122,7 +123,15 @@ def main():
             a, b = two
             width = (a["width"] + b["width"]) / 2
             lines.append(f"{kit}|{name}|{pieces[name]['classPath']}|{kind}|{fmt(a['joint'])} {fmt(a['normal'])}|"
-                         f"{fmt(b['joint'])} {fmt(b['normal'])}|{width:.1f}|{sz:g}")
+                         f"{fmt(b['joint'])} {fmt(b['normal'])}|{width:.1f}|{sz:g}|0")
+            if kind == "sag":
+                # the same ramp rolled 180 degrees: a crest, ridden on its underside (the ramps are slabs of even
+                # thickness). Its ends: the bottom joints, in the piece's own frame (the roll is applied when placed)
+                for e in two:
+                    flipped = sk.upside_down(e)
+                    ends.append((name + " crest", sz, flipped, sk.end_top(flipped, sz)))
+                lines.append(f"{kit}|{name} crest|{pieces[name]['classPath']}|crest|{fmt(a['bottom'])} {fmt(a['normal'])}|"
+                             f"{fmt(b['bottom'])} {fmt(b['normal'])}|{width:.1f}|{sz:g}|180")
         worst = 0.0
         for i in range(len(ends)):
             for j in range(i, len(ends)):
@@ -180,7 +189,7 @@ def main():
         c, h = (lo + hi) / 2, (hi - lo) / 2
         boxes.append(f"{cls}|{c[0]:.1f} {c[1]:.1f} {c[2]:.1f}|{h[0]:.1f} {h[1]:.1f} {h[2]:.1f}")
     (PLUGIN / "bounds.txt").write_text(NL.join(boxes) + NL, encoding="utf-8")
-    print(f"kit.txt: {len(lines) - 2} pieces in {len(KITS)} kits; ends.txt: {len(rows) - 3} pieces; "
+    print(f"kit.txt: {len(lines) - 3} pieces in {len(KITS)} kits; ends.txt: {len(rows) - 3} pieces; "
           f"bounds.txt: {len(boxes) - 1} pieces")
 
 

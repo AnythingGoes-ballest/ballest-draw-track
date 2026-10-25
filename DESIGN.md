@@ -145,6 +145,49 @@ Round's ramps are its double-height dome, and no kit has a crest (a downward ben
   taken up by that bend. Measured in a slot: 8 m scrolled with the mouse still, the outline rose to the cursor at once,
   and the line built with a Curve1 L at the foot.
 
+## Crests, loops and placing speed (0.4.0, 2026-10-24, the user's reports)
+
+- **Crests**: the Ramp Curve1 pieces are curved slabs of even thickness (measured: 100 cm all along), so rolled 180
+  degrees a ramp is a crest ridden on its underside. kit.txt lists each ramp again as a crest (its ends: the faces'
+  bottom joints, roll 180), seam-checked like the rest; a bend over the top now uses the largest crest that fits, and
+  short pieces only where none does. FindPieces reads a ramp rolled over with its crest ends. A 6 m climb and drop is
+  14 pieces (2 sags, 2 crests) where it was 28. In a slot the crest's riding surface shows the ramp's underside finish.
+- **Loops**: a line drawn back to its own start (its last point within the track's width, after going further than four
+  of the smallest turns away) closes: the start is the end it joins, facing back along the line, at the start's height,
+  and the line's first and last 15 m never count as in each other's way. Measured offline: ending short of the start,
+  at it, 3 m past it, 2 m off to the side and a small loop all close exactly.
+- **The crash**: placing a 94-piece line crashed the user's game at the engine's UObject limit (2,162,688). The
+  editor's paste, which SpawnPieces uses, rebuilds the outliner and Details panel once per pasted piece; the objects
+  that makes are freed only by the next garbage collection. The host now holds those UI refreshes during SpawnPieces'
+  paste and runs each once (from the 2026-10-15 fast-paste work, here only for SpawnPieces; the player's own pastes
+  are untouched). Measured on the test map: 14 / 32 / 55 pieces took 685 / 954 / 1950 ms and made 13k / 72k / 161k
+  objects before; 110 / 111 / 194 ms and 0 / 0 / 19k after. Undo and redo still take a line as one step.
+
+## Joins, wave placing, one-piece straights, Ctrl+Z, lag (0.5.0, 2026-10-25, the user's reports)
+
+- **Joins as nodes**: every level join between two pieces of one kit is a node too, shown (small, white) only within
+  140 px of the cursor, the nearest 24. A line started on one branches off the way it is drawn (whichever of the
+  join's two ends faces that way); one ending on one merges in the way it arrives. Both pieces at the join, and
+  anything within twice the smallest turn's radius plus the width along the line from it, don't count as in its way
+  (it runs along the track it leaves until it has turned off). Offline: branching both ways and merging, all kits.
+- **The level over a node**: stepping the level (Page Up / Down, the menu's - / +) with the cursor on a node was undone
+  the next frame (the level was set to the node's every frame); it is kept as an offset for that node now, shown in
+  the tip ("to +4.0 m"), and the line from it goes there. Measured in a slot: +4 m.
+- **One piece per straight**: a straight is one piece, stretched up to 10 times the kit's longest (Track M: 100 m). An L
+  is 3 pieces (was 9), a zigzag of 4 turns 9 (19), a loop 9 (29).
+- **Placing in a wave**: still one paste (one undo step), but each piece stays hidden until its fall starts, up to
+  80 ms after the one before (the whole wave 1.5 s at most), each falling 6 m in 0.35 s.
+- **Ctrl+Z**: Draw Track's own undo (for when the editor doesn't get the key) waited 0.25 s and looked at the pieces;
+  on a slow map the editor's undo came later and both undid (the line and the step before it). The host now counts
+  the editor's undo and redo steps (Editor::HistoryMoves, from its native Undo / Redo); Draw Track undoes only when
+  the editor ran none in 0.6 s, with the pencil on or off. Measured in a slot: 72 -> 21 pieces, the editor's own none.
+- **Lag**: Draw Core set its ring's corner radius whenever the ring changed size (most frames the cursor moved), and a
+  window's look changed builds the whole window again: the user's log had "window built with 0 widgets" ~1000 times
+  and the game's objects grew from 93k to 499k in minutes. Draw Core sets it once now, and the host builds a window
+  again only when a setter changes something. Draw Track draws its node balls again only when the open ends changed
+  (they were all made again every 2 s). Measured in a slot: no window builds while drawing; a 51-piece line placed in
+  111 ms.
+
 ## Nodes (city builders' road tools as the model)
 
 While the pencil is on, every open end (level, of any track piece with two track ends: ends.txt, 28 pieces) shows as

@@ -9,13 +9,17 @@
 //
 // The line becomes real kit pieces joined end to end (straights stretched to fit, 90-degree curves, slopes from pitched
 // straights): the closest track to what was drawn that the ball can ride. A kit is a set of pieces whose ends all meet
-// (Track, Bevel Half, Bevel Full, Round), picked in the menu; a line carried on from a node is that node's kit. Turns are smoothed to
-// the curve whose size best matches how wide the turn was drawn; slopes follow the heights drawn (up to 45 degrees),
-// bend up through the kit's own ramp pieces (sags) where it has them and over the top through short pieces a few
-// degrees apart, and turns stay level. While the pencil is on, every open end of the track already in the map shows as a node:
-// a line started on one carries it on (its height, heading and width), and a line ending on one joins it when the
-// pieces can meet it exactly. Where the track would pass through a piece already there (or itself), it rises over it
-// as a bridge with ramps either side, or ends before it when it can't climb in time or the piece is too tall.
+// (Track, Bevel Half, Bevel Full, Round), picked in the menu; a line carried on from a node is that node's kit. Turns
+// are smoothed to the curve whose size best matches how wide the turn was drawn; slopes follow the heights drawn (up to
+// 45 degrees), bend up through the kit's own ramp pieces (sags) and over the top through the same ramps turned upside
+// down (crests) where it has them, else through short pieces a few degrees apart, and turns stay level.
+//
+// While the pencil is on, every open end of the track already in the map shows as a node: a line started on one
+// carries it on (its height, heading and width), and a line ending on one joins it when the pieces can meet it exactly.
+// The joins between pieces already in the map are nodes too, shown near the cursor: a line started on one branches off
+// there (the way it is drawn), one ending on one merges in. A line drawn back to its own start closes into a loop.
+// Where the track would pass through a piece already there (or itself), it rises over it as a bridge with ramps either
+// side, or ends before it when it can't climb in time or the piece is too tall.
 //
 // The shape of it follows how city builders' road tools work: nodes shown and snapped to, the road type carried on
 // from a node, an explicit level changed a step at a time and shown at the cursor, clearance needed under bridges,
@@ -45,6 +49,8 @@ class KitPiece
     string classPath;
     bool turn;
     bool sag;                   // a ramp curve: level in plan, bending the track upward (its ends both tilt up)
+    bool crest;                 // a ramp curve rolled over: bending the track downward, ridden on its underside
+    double roll = 0;            // degrees, as placed (a crest: 180; its ends are in its frame before the roll)
     array<double> a(6);         // end A: x y z (where the rolling surface meets it), outward dx dy dz
     array<double> b(6);
     double width = 500;         // the track's width at scale 1
@@ -60,13 +66,14 @@ class Kit
     array<int> straights;       // kit indexes, shortest first
     array<int> turns;           // kit indexes, smallest first
     array<int> sags;            // kit indexes, largest first
+    array<int> crests;          // kit indexes, largest first
     double width = 500;         // the track's width at scale 1
     double depth = 100;         // how far a piece reaches below its rolling surface (scale 1)
 }
 array<Kit@> kits;
 int kitChoice = 0;              // the menu's kit
 int lineKit = 0;                // the line's: its node's when it carries one on, else the menu's
-array<int> straights, turns, sags;  // the line's kit's, for the fitter (UseKit)
+array<int> straights, turns, sags, crests;  // the line's kit's, for the fitter (UseKit)
 double kitWidth = 500, kitDepth = 100;
 
 void UseKit(int k)
@@ -75,6 +82,7 @@ void UseKit(int k)
     straights = kits[k].straights;
     turns = kits[k].turns;
     sags = kits[k].sags;
+    crests = kits[k].crests;
     kitWidth = kits[k].width;
     kitDepth = kits[k].depth;
 }
@@ -102,6 +110,7 @@ class Placed
     bool viaB;                  // entered by end B (a turn the other way)
     double x, y, z;             // the piece's location
     double pitch, yaw;          // degrees
+    double roll = 0;            // degrees (a crest: 180)
     double sx, sy, sz;          // scale
     double jx, jy, jz;          // where its entry is (the joint)
     double ex, ey, ez;          // where its exit is
@@ -121,6 +130,8 @@ class OpenEnd
     bool level = true;          // only a level end is a node (a sloped one still counts as joining its neighbour)
     int kit = -1;               // the kit it is (only a kit's end is a node; any end counts as joining its neighbour)
     int piece;
+    bool joined = false;        // another piece's end is on it: a join between two pieces (a node shown near the cursor)
+    OpenEnd@ twin;              // a join's other end (the other piece's, facing the other way)
 }
 
 // One part of the line's plan: a straight (its length in plan) or a 90-degree turn.
@@ -176,6 +187,8 @@ const float BOX_R = 0.08f, BOX_G = 0.08f, BOX_B = 0.09f;
 const float BUTTON_R = 0.0232f, BUTTON_G = 0.0273f, BUTTON_B = 0.0382f;
 const float LIME_R = 0.80f, LIME_G = 1.0f, LIME_B = 0.0f;
 
+OpenEnd@ offsetNode;                    // the node the level offset below is for
+double nodeOffset = 0;                  // the level stepped up or down over the node under the cursor (cm)
 double lineWidth = -1;                  // the line being drawn: its node's width when carried on from one, else -1
 double TrackWidth() { return lineWidth > 0 ? lineWidth : kMinWidth + widthSetting * (kMaxWidth - kMinWidth); }
 double WidthScale() { return TrackWidth() / kitWidth; }
@@ -252,6 +265,8 @@ void ParseTables(const string &in kitText, const string &in boundsText, const st
         k.classPath = f[2];
         k.turn = f[3] == "turn";
         k.sag = f[3] == "sag";
+        k.crest = f[3] == "crest";
+        k.roll = f.length() > 8 ? parseFloat(f[8]) : 0;
         array<double>@ a = Numbers(f[4]);
         array<double>@ b = Numbers(f[5]);
         if (a.length() < 6 || b.length() < 6)
@@ -266,6 +281,8 @@ void ParseTables(const string &in kitText, const string &in boundsText, const st
             kits[k.kit].turns.insertLast(index);
         else if (k.sag)
             kits[k.kit].sags.insertLast(index);
+        else if (k.crest)
+            kits[k.kit].crests.insertLast(index);
         else
         {
             kits[k.kit].straights.insertLast(index);
@@ -284,15 +301,18 @@ void ParseTables(const string &in kitText, const string &in boundsText, const st
                     st[i] = st[j];
                     st[j] = t;
                 }
-        array<int>@ sa = kits[n].sags;
-        for (uint i = 0; i < sa.length(); i++)
-            for (uint j = i + 1; j < sa.length(); j++)
-                if (SagHalfSpan(sa[j]) > SagHalfSpan(sa[i]))
-                {
-                    int t = sa[i];
-                    sa[i] = sa[j];
-                    sa[j] = t;
-                }
+        for (int list = 0; list < 2; list++)
+        {
+            array<int>@ sa = list == 0 ? kits[n].sags : kits[n].crests;
+            for (uint i = 0; i < sa.length(); i++)
+                for (uint j = i + 1; j < sa.length(); j++)
+                    if (SagHalfSpan(sa[j]) > SagHalfSpan(sa[i]))
+                    {
+                        int t = sa[i];
+                        sa[i] = sa[j];
+                        sa[j] = t;
+                    }
+        }
         array<int>@ tu = kits[n].turns;
         for (uint i = 0; i < tu.length(); i++)
             for (uint j = i + 1; j < tu.length(); j++)
@@ -371,6 +391,15 @@ int EndKitAt(int e, int end, double sz)
     return k >= 0 && Math::abs(sz - scale) < 0.05 ? k : -1;
 }
 
+// The kit's crest made from the piece of this class, or -1.
+int CrestOfClass(const string &in cls)
+{
+    for (uint i = 0; i < kit.length(); i++)
+        if (kit[i].crest && ClassName(kit[i].classPath) == cls)
+            return int(i);
+    return -1;
+}
+
 string ClassName(const string &in classPath)
 {
     int dot = classPath.findLast(".");
@@ -384,7 +413,8 @@ double StraightLength(int k)
     return Math::sqrt((p.b[0] - p.a[0]) * (p.b[0] - p.a[0]) + (p.b[1] - p.a[1]) * (p.b[1] - p.a[1]));
 }
 
-// A sag's half span (its ends' distance apart along it, halved) and the angle its ends tilt up (radians), at scale 1.
+// A sag's (or crest's) half span (its ends' distance apart along it, halved) and the angle its ends tilt (radians), at
+// scale 1.
 double SagHalfSpan(int k)
 {
     KitPiece@ p = kit[k];
@@ -468,11 +498,12 @@ Placed@ Put(int k, bool viaB, double jx, double jy, double jz, double heading, d
     q.sx = sx;
     q.sy = sy;
     q.sz = p.sz;
+    q.roll = p.roll;
     // a straight entered by B points backwards: its pitch is turned round with it
     if (!p.turn && Math::abs(localHeading) > 90)
         q.pitch = -pitch;
     array<double> m(9);
-    Axes(q.pitch, q.yaw, m);
+    AxesRoll(q.pitch, q.yaw, q.roll, m);
     double ix, iy, iz, ox, oy, oz;
     Apply(m, inEnd[0] * sx, inEnd[1] * sy, inEnd[2] * q.sz, ix, iy, iz);
     Apply(m, outEnd[0] * sx, outEnd[1] * sy, outEnd[2] * q.sz, ox, oy, oz);
@@ -524,6 +555,13 @@ void FindPieces()
             double ax, ay, az, adx, ady, adz, bx, by, bz, bdx, bdy, bdz;
             array<double>@ a = endA[e];
             array<double>@ b = endB[e];
+            // a ramp turned over (a crest) is ridden on its underside: its crest ends
+            int over = Math::abs(Math::abs(roll) - 180) < 10 ? CrestOfClass(cls) : -1;
+            if (over >= 0)
+            {
+                @a = kit[over].a;
+                @b = kit[over].b;
+            }
             Apply(o.m, a[0] * sx, a[1] * sy, a[2] * sz, ax, ay, az);
             Apply(o.m, a[3], a[4], a[5], adx, ady, adz);
             Apply(o.m, b[0] * sx, b[1] * sy, b[2] * sz, bx, by, bz);
@@ -555,21 +593,36 @@ void FindPieces()
             obstacles.insertLast(o);
         }
     }
-    // an end with another end on it is joined, not open
+    // an end with another end on it is joined, not open; a level join of one kit's two ends is a node of its own
+    joinEnds.resize(0);
     for (uint i = 0; i < all.length(); i++)
     {
-        bool joined = false;
-        for (uint j = 0; j < all.length() && !joined; j++)
+        int partner = -1;
+        for (uint j = 0; j < all.length() && partner < 0; j++)
             if (i != j && all[i].piece != all[j].piece)
             {
                 double dx = all[i].x - all[j].x, dy = all[i].y - all[j].y, dz = all[i].z - all[j].z;
-                joined = dx * dx + dy * dy + dz * dz < 40 * 40;
+                if (dx * dx + dy * dy + dz * dz < 40 * 40)
+                    partner = int(j);
             }
-        if (!joined && all[i].level && all[i].kit >= 0)
+        if (partner < 0 && all[i].level && all[i].kit >= 0)
             openEnds.insertLast(all[i]);
+        if (partner >= 0 && all[i].level && all[i].kit >= 0 && all[uint(partner)].level && all[uint(partner)].kit == all[i].kit)
+        {
+            all[i].joined = true;
+            @all[i].twin = all[uint(partner)];
+            joinEnds.insertLast(all[i]);
+        }
     }
-    markersDirty = true;
+    // the node balls are drawn again only when the open ends changed (every 2 s they were all made again: churn)
+    double sign = openEnds.length();
+    for (uint i = 0; i < openEnds.length(); i++)
+        sign += openEnds[i].x * 1.3 + openEnds[i].y * 1.7 + openEnds[i].z * 2.1 + openEnds[i].kit * 7;
+    if (sign != markedSign)
+        markersDirty = true;
+    markedSign = sign;
 }
+double markedSign = -1;
 
 // Whether a point is on one of the map's pieces, not the arena or the scenery around it.
 bool OnAPiece(double x, double y, double z)
@@ -589,15 +642,53 @@ void AxesRoll(double pitch, double yaw, double roll, array<double>@ m)
     m[6] = -(cr * sp * cy + sr * sy);    m[7] = cy * sr - cr * sp * sy;       m[8] = cr * cp;
 }
 
-// The node (open end) under the cursor: within kSnapPixels of it on screen, or the cursor at its level within half its
-// track's width (2 m at least) of it, so far nodes are as easy to hit as near ones. The nearest wins; null if none.
+// The joins between pieces already in the map (each join's two ends), and the ones near the cursor now (one end of
+// each): those show as nodes, and the cursor can take one.
+array<OpenEnd@> joinEnds;
+array<OpenEnd@> nearJoins;
+const double kRevealPixels = 140;       // a join this close to the cursor on screen shows
+const int kMaxNearJoins = 24;
+
+void FindNearJoins(float mx, float my)
+{
+    nearJoins.resize(0);
+    array<double> dist;
+    for (uint i = 0; i < joinEnds.length(); i++)
+    {
+        OpenEnd@ e = joinEnds[i];
+        if (e.twin !is null && e.twin.piece < e.piece)
+            continue;                   // one end of each join
+        float sx, sy;
+        if (!Camera::Project(e.x, e.y, e.z, sx, sy))
+            continue;
+        double d = Math::sqrt((sx - mx) * (sx - mx) + (sy - my) * (sy - my));
+        if (d > kRevealPixels)
+            continue;
+        uint at = 0;
+        while (at < dist.length() && dist[at] <= d)
+            at++;
+        if (at >= uint(kMaxNearJoins))
+            continue;
+        dist.insertAt(at, d);
+        nearJoins.insertAt(at, e);
+        if (nearJoins.length() > uint(kMaxNearJoins))
+        {
+            nearJoins.removeLast();
+            dist.removeLast();
+        }
+    }
+}
+
+// The node under the cursor (an open end, or a join near the cursor): within kSnapPixels of it on screen, or the
+// cursor at its level within half its track's width (2 m at least) of it, so far nodes are as easy to hit as near
+// ones. The nearest wins (an open end over a join as near); null if none.
 OpenEnd@ EndUnderCursor(float mx, float my)
 {
     OpenEnd@ best = null;
     double bestScore = 1e30;
-    for (uint i = 0; i < openEnds.length(); i++)
+    for (uint i = 0; i < openEnds.length() + nearJoins.length(); i++)
     {
-        OpenEnd@ e = openEnds[i];
+        OpenEnd@ e = i < openEnds.length() ? openEnds[i] : nearJoins[i - openEnds.length()];
         double score = 1e30;
         float sx, sy;
         if (Camera::Project(e.x, e.y, e.z, sx, sy))
@@ -614,6 +705,8 @@ OpenEnd@ EndUnderCursor(float mx, float my)
             if (d <= reach && d / reach * kSnapPixels < score)
                 score = d / reach * kSnapPixels;
         }
+        if (e.joined)
+            score *= 1.15;
         if (score < bestScore)
         {
             bestScore = score;
@@ -628,11 +721,22 @@ OpenEnd@ EndUnderCursor(float mx, float my)
 bool markersDirty = true;
 int markedKit = -1;                     // the kit the nodes were shown for
 array<int> markers;
+array<int> joinMarks;                   // the joins near the cursor
+array<OpenEnd@> markedJoins;
 int hoverMark = 0, guide = 0;
 OpenEnd@ markedHover;
 
+void ClearJoinMarks()
+{
+    for (uint i = 0; i < joinMarks.length(); i++)
+        Draw::Remove(joinMarks[i]);
+    joinMarks.resize(0);
+    markedJoins.resize(0);
+}
+
 void ClearMarkers()
 {
+    ClearJoinMarks();
     for (uint i = 0; i < markers.length(); i++)
         Draw::Remove(markers[i]);
     markers.resize(0);
@@ -671,6 +775,21 @@ void ShowMarkers(bool on)
             markers.insertLast(b);
         }
     }
+    // the joins near the cursor: small and white, only while it is near them
+    bool same = markedJoins.length() == nearJoins.length();
+    for (uint i = 0; i < nearJoins.length() && same; i++)
+        same = markedJoins[i] is nearJoins[i];
+    if (!same)
+    {
+        ClearJoinMarks();
+        for (uint i = 0; i < nearJoins.length(); i++)
+        {
+            int b = Draw::Ball(32, 0.92f, 0.96f, 1, true);
+            Draw::Move(b, nearJoins[i].x, nearJoins[i].y, nearJoins[i].z + 20);
+            joinMarks.insertLast(b);
+            markedJoins.insertLast(nearJoins[i]);
+        }
+    }
     if (hoverEnd is markedHover)
         return;
     @markedHover = hoverEnd;
@@ -684,8 +803,10 @@ void ShowMarkers(bool on)
         return;
     hoverMark = Draw::Ball(90, LIME_R, LIME_G, LIME_B, true);
     Draw::Move(hoverMark, hoverEnd.x, hoverEnd.y, hoverEnd.z + 20);
+    // the way a line from it goes (a join: both ways along the track)
     double h = Rad(hoverEnd.heading);
-    array<double> pair = {hoverEnd.x, hoverEnd.y, hoverEnd.z + 10,
+    double back = hoverEnd.joined ? 2000 : 0;
+    array<double> pair = {hoverEnd.x - Math::cos(h) * back, hoverEnd.y - Math::sin(h) * back, hoverEnd.z + 10,
                           hoverEnd.x + Math::cos(h) * 2000, hoverEnd.y + Math::sin(h) * 2000, hoverEnd.z + 10};
     guide = Draw::Segments(pair, 8, LIME_R, LIME_G, LIME_B, true, 0.5f);
 }
@@ -1207,7 +1328,7 @@ Obstacle@ OwnObstacle(Placed@ p, int order)
     o.x = p.x;
     o.y = p.y;
     o.z = p.z;
-    Axes(p.pitch, p.yaw, o.m);
+    AxesRoll(p.pitch, p.yaw, p.roll, o.m);
     o.sx = p.sx;
     o.sy = p.sy;
     o.sz = p.sz;
@@ -1217,7 +1338,7 @@ Obstacle@ OwnObstacle(Placed@ p, int order)
     if (k.turn)
     {
         array<double> m(9);
-        Axes(p.pitch, p.yaw, m);
+        AxesRoll(p.pitch, p.yaw, p.roll, m);
         double adx, ady, adz, bdx, bdy, bdz;
         Apply(m, k.a[3], k.a[4], k.a[5], adx, ady, adz);
         Apply(m, k.b[3], k.b[4], k.b[5], bdx, bdy, bdz);
@@ -1258,6 +1379,7 @@ const double kKink = 5;                 // degrees: the most one joint between t
 const double kMinBend = 1.5;            // degrees: a bend smaller than this is just a joint
 const double kKinkRadius = 2000;        // cm: the largest circle a bend made of short pieces follows
 const double kMinStraight = 60;         // cm: a straight shorter than this between bends is taken up by one
+const double kMaxStretch = 10;          // a straight piece is stretched up to this many times its length (Track M: 100 m)
 const double kShortGrade = 600;         // cm in plan: a grade this short between two bends the same way is merged away
 const double kTooTall = 1500;           // cm: higher than this above the line, an obstacle isn't bridged
 
@@ -1364,6 +1486,10 @@ void Clearance(bool own, double jx, double jy, double ex, double ey)
     {
         Joint@ a = joints[k];
         Joint@ b = joints[k + 1];
+        // a branch off a join runs along the track it leaves until it has turned away (and one merging in, along the
+        // track it joins): the pieces there are its own road, not in its way
+        if ((branchStart && a.path < branchClear) || (branchEnd && b.path > joints[joints.length() - 1].path - branchClear))
+            continue;
         array<double> px, py;
         // the run's centre line in plan
         if (a.ex != a.x || a.ey != a.y)
@@ -1406,11 +1532,13 @@ void Clearance(bool own, double jx, double jy, double ex, double ey)
         double zl = (a.target < b.target ? a.target : b.target) - 120, zh = (a.target > b.target ? a.target : b.target) + 180;
         array<Obstacle@> near;
         for (uint o = 0; o < obstacles.length(); o++)
-            if (obstacles[o].piece != skipFrom && obstacles[o].piece != skipTo && Near(obstacles[o], x0, y0, x1, y1, zl, zh))
+            if (obstacles[o].piece != skipFrom && obstacles[o].piece != skipTo && obstacles[o].piece != skipFrom2 &&
+                obstacles[o].piece != skipTo2 && Near(obstacles[o], x0, y0, x1, y1, zl, zh))
                 near.insertLast(obstacles[o]);
         if (own)
             for (uint o = 0; o < ownObstacles.length(); o++)
-                if (ownObstacles[o].pathEnd < a.path - 400 && Near(ownObstacles[o], x0, y0, x1, y1, zl, zh))
+                if (ownObstacles[o].pathEnd < a.path - 400 && Near(ownObstacles[o], x0, y0, x1, y1, zl, zh) &&
+                    !(loopClosed && ownObstacles[o].pathEnd < kLoopClear && a.path > joints[joints.length() - 1].path - kLoopClear))
                     near.insertLast(ownObstacles[o]);
         if (near.length() == 0)
             continue;
@@ -1456,6 +1584,9 @@ void Hit(Obstacle@ o, double qx, double qy, double t, uint k)
 }
 
 int skipFrom = -1, skipTo = -1;         // the pieces the line starts from and joins: never in its way
+int skipFrom2 = -1, skipTo2 = -1;       // at a join: the other piece there
+bool branchStart = false, branchEnd = false;    // the line starts from (ends on) a join between two pieces
+double branchClear = 0;                 // cm along the line from such a join where nothing counts as in its way
 array<Obstacle@> ownObstacles;
 
 // The heights: the drawn ones (as steep as drawn, up to kSlope), raised where something is in the way with ramps of
@@ -1656,19 +1787,20 @@ void BuildLeg(uint k0, uint k1, double x, double y, double z, double heading, do
         double roomR = len[v] * (v == m - 1 ? 1 : 0.5);
         if (roomR < room)
             room = roomR;
-        if (bend > 0)
-            for (uint q = 0; q < sags.length() && sagAt[v] < 0; q++)
+        // upward: a sag; over the top: a crest (a ramp turned over), the largest that fits
+        array<int>@ bends = bend > 0 ? sags : crests;
+        for (uint q = 0; q < bends.length() && sagAt[v] < 0; q++)
+        {
+            double phi = Math::abs(SagHalfAngle(bends[q])), a = SagHalfSpan(bends[q]);
+            double st = Math::tan(phi) / Math::tan(Math::abs(bend) / 2);
+            double reach = Math::sqrt(st * st * a * a + a * a * Math::tan(phi) * Math::tan(phi));
+            if (st >= 0.5 && st <= 6 && reach <= room)
             {
-                double phi = SagHalfAngle(sags[q]), a = SagHalfSpan(sags[q]);
-                double st = Math::tan(phi) / Math::tan(bend / 2);
-                double reach = Math::sqrt(st * st * a * a + a * a * Math::tan(phi) * Math::tan(phi));
-                if (st >= 0.5 && st <= 6 && reach <= room)
-                {
-                    sagAt[v] = sags[q];
-                    stretch[v] = st;
-                    t[v] = reach;
-                }
+                sagAt[v] = bends[q];
+                stretch[v] = st;
+                t[v] = reach;
             }
+        }
         if (sagAt[v] < 0)
         {
             double half = Math::tan(Math::abs(bend) / 2);
@@ -1715,7 +1847,8 @@ void BuildLeg(uint k0, uint k1, double x, double y, double z, double heading, do
         double straight = len[i] - t[i] - t[i + 1];
         if (straight > 0.5)
         {
-            int pieces = int(Math::ceil(straight / StraightLength(straights[straights.length() - 1])));
+            // as few pieces as the straight can be: one, stretched, up to kMaxStretch times the kit's longest
+            int pieces = int(Math::ceil(straight / (StraightLength(straights[straights.length() - 1]) * kMaxStretch)));
             double piece = straight / pieces;
             for (int q = 0; q < pieces; q++)
             {
@@ -1741,7 +1874,9 @@ void BuildLeg(uint k0, uint k1, double x, double y, double z, double heading, do
             x = p.ex;
             y = p.ey;
             z = p.ez;
-            rz[rz.length() - 1] = 1e18;     // a sag lies above the grades either side: never short of a need
+            if (th[v] > th[i])
+                rz[rz.length() - 1] = 1e18; // a sag lies above the grades either side: never short of a need
+            // (a crest lies between its corner and the straight line from its entry to its exit: checked on that line)
         }
         else if (kinks[v] > 0)
         {
@@ -1856,6 +1991,30 @@ array<double> shiftX, shiftY;
 
 int stopped = -1;                       // the joint the track stops before (in the way), or -1
 bool noJoin = false;                    // fitting again without the end it couldn't join
+bool loopClosed = false;                // the line ends back at its own start: a loop
+const double kLoopClear = 1500;         // cm along the track: a loop's first and last pieces never count as in each
+                                        // other's way (they meet there)
+
+// Whether the line has come back to its start (jx, jy): its last point within the track's width of it (3 m at least),
+// after going further away than four of the kit's smallest turns.
+bool BackAtStart(double jx, double jy)
+{
+    uint n = lx.length();
+    if (n < 3 || turns.length() == 0)
+        return false;
+    double reach = TrackWidth() > 300 ? TrackWidth() : 300;
+    double dx = lx[n - 1] - jx, dy = ly[n - 1] - jy;
+    if (dx * dx + dy * dy > reach * reach)
+        return false;
+    double away = 4 * TurnRadius(turns[0]) * WidthScale(), far = 0;
+    for (uint i = 0; i < n; i++)
+    {
+        double d = (lx[i] - jx) * (lx[i] - jx) + (ly[i] - jy) * (ly[i] - jy);
+        if (d > far)
+            far = d;
+    }
+    return far > away * away;
+}
 
 // Whether the plan's straights all run forwards and it ends on the end it is to join (in plan, within 20 cm).
 bool PlanReaches(array<Seg@>@ segs, double jx, double jy, double a0, OpenEnd@ endAt)
@@ -1900,15 +2059,42 @@ void Refit()
         else
             otherKit = true;
     }
+    // a line from a join goes the way it is drawn: whichever of the join's two ends faces that way
+    OpenEnd@ from = startEnd;
+    if (from !is null && from.joined && from.twin !is null)
+    {
+        double need = TurnRadius(turns[0]) * WidthScale();
+        int far = -1;
+        for (int i = 0; i < n && far < 0; i++)
+            if ((lx[i] - from.x) * (lx[i] - from.x) + (ly[i] - from.y) * (ly[i] - from.y) >= need * need)
+                far = i;
+        if (far < 0)
+            return;                     // not far enough yet to know which way it goes
+        double way = Math::atan2(ly[far] - from.y, lx[far] - from.x);
+        if (Math::cos(way - Rad(from.twin.heading)) > Math::cos(way - Rad(from.heading)))
+            @from = from.twin;
+    }
+    // a line ending on a join merges in the way it arrives
+    if (endAt !is null && endAt.joined && endAt.twin !is null && n >= 2)
+    {
+        int back = n - 1;
+        double need = TurnRadius(turns[0]) * WidthScale();
+        while (back > 0 && (lx[back] - endAt.x) * (lx[back] - endAt.x) + (ly[back] - endAt.y) * (ly[back] - endAt.y) < need * need)
+            back--;
+        double way = Math::atan2(endAt.y - ly[back], endAt.x - lx[back]);
+        // arriving at an end means heading the opposite way to it
+        if (Math::cos(way - Rad(endAt.twin.heading + 180)) > Math::cos(way - Rad(endAt.heading + 180)))
+            @endAt = endAt.twin;
+    }
     // the start: an open end carried on, or the line's first point heading the way it was first drawn (to 15
     // degrees; lined up with the end it is to join, when there is one)
     double jx = lx[0], jy = ly[0], jz = lz[0], a0 = 0;
-    if (startEnd !is null)
+    if (from !is null)
     {
-        jx = startEnd.x;
-        jy = startEnd.y;
-        jz = startEnd.z;
-        a0 = startEnd.heading;
+        jx = from.x;
+        jy = from.y;
+        jz = from.z;
+        a0 = from.heading;
     }
     else
     {
@@ -1927,6 +2113,22 @@ void Refit()
         }
         else
             a0 = 15 * Math::floor(a0 / 15 + 0.5);
+    }
+    // a line drawn back to its own start closes into a loop: its start is the end it joins, facing back along it, so
+    // the last piece runs into the first
+    loopClosed = false;
+    if (endAt is null && !noJoin && BackAtStart(jx, jy))
+    {
+        OpenEnd own;
+        own.x = jx;
+        own.y = jy;
+        own.z = jz;
+        own.heading = a0 + 180;
+        own.width = TrackWidth();
+        own.kit = lineKit;
+        own.piece = -2;
+        @endAt = own;
+        loopClosed = true;
     }
     // ending on a node: the node is the line's end (the cursor is on it on screen, wherever the plane is under it)
     array<double> fx = lx, fy = ly, fz = lz;
@@ -1950,8 +2152,13 @@ void Refit()
             segs.removeAt(k);           // a leg shorter than its turns need: the turns join directly
     if (segs.length() == 0)
         return;
-    skipFrom = startEnd !is null ? startEnd.piece : -1;
+    skipFrom = from !is null ? from.piece : -1;
     skipTo = endAt !is null ? endAt.piece : -1;
+    skipFrom2 = from !is null && from.twin !is null ? from.twin.piece : -1;
+    skipTo2 = endAt !is null && endAt.twin !is null ? endAt.twin.piece : -1;
+    branchStart = from !is null && from.joined;
+    branchEnd = endAt !is null && endAt.joined;
+    branchClear = 2 * TurnRadius(turns[0]) * WidthScale() + TrackWidth();
     MakeJoints(segs, jx, jy, a0);
     Targets(fx, fy, fz);
     double ex = endAt !is null ? endAt.x : 0, ey = endAt !is null ? endAt.y : 0;
@@ -1959,7 +2166,7 @@ void Refit()
     ownObstacles.resize(0);
     Clearance(false, jx, jy, ex, ey);
     int stop;
-    array<Placed@>@ first = HeightsAndPieces(segs, jx, jy, jz, a0, startEnd !is null, endAt !is null ? endAt.z : 0, joinsEnd, stop);
+    array<Placed@>@ first = HeightsAndPieces(segs, jx, jy, jz, a0, startEnd !is null || loopClosed, endAt !is null ? endAt.z : 0, joinsEnd, stop);
     for (uint i = 0; i < first.length(); i++)
     {
         Obstacle@ o = OwnObstacle(first[i], int(i));
@@ -1974,14 +2181,17 @@ void Refit()
         joints[k].blocked = false;
     }
     Clearance(true, jx, jy, ex, ey);
-    track = HeightsAndPieces(segs, jx, jy, jz, a0, startEnd !is null, endAt !is null ? endAt.z : 0, joinsEnd, stopped);
+    track = HeightsAndPieces(segs, jx, jy, jz, a0, startEnd !is null || loopClosed, endAt !is null ? endAt.z : 0, joinsEnd, stopped);
     if (stopped >= 0)
         fitNote = "in the way (red): raise the level (PgUp) or go round";
     else if (endAt !is null)
     {
         Placed@ last = track.length() > 0 ? track[track.length() - 1] : null;
         double miss = last is null ? 1e9 : Math::sqrt((last.ex - endAt.x) * (last.ex - endAt.x) + (last.ey - endAt.y) * (last.ey - endAt.y) + (last.ez - endAt.z) * (last.ez - endAt.z));
-        fitNote = miss < 20 ? "joins the track there" : (joinsEnd ? "couldn't reach the end's height" : "can't join that end from here");
+        if (loopClosed)
+            fitNote = miss < 20 ? "closes the loop" : "can't close the loop from here";
+        else
+            fitNote = miss < 20 ? "joins the track there" : (joinsEnd ? "couldn't reach the end's height" : "can't join that end from here");
     }
     else
     {
@@ -2027,7 +2237,7 @@ void Outline(Placed@ p, array<double>@ pairs)
     array<double>@ inEnd = p.viaB ? kit[p.piece].b : kit[p.piece].a;
     array<double>@ outEnd = p.viaB ? kit[p.piece].a : kit[p.piece].b;
     array<double> m(9);
-    Axes(p.pitch, p.yaw, m);
+    AxesRoll(p.pitch, p.yaw, p.roll, m);
     double ix, iy, iz, ox, oy, oz;
     Apply(m, -inEnd[3], -inEnd[4], -inEnd[5], ix, iy, iz);
     Apply(m, outEnd[3], outEnd[4], outEnd[5], ox, oy, oz);
@@ -2129,7 +2339,7 @@ void Build()
         transforms.insertLast(p.z);
         transforms.insertLast(p.pitch);
         transforms.insertLast(p.yaw);
-        transforms.insertLast(0);
+        transforms.insertLast(p.roll);
         transforms.insertLast(p.sx);
         transforms.insertLast(p.sy);
         transforms.insertLast(p.sz);
@@ -2224,7 +2434,8 @@ void ShowState()
             t = (rise >= 0 ? "+" : "") + formatFloat(rise / 100, "", 0, 1) + " m";
         }
         else if (hoverEnd !is null)
-            t = KitLabel(hoverEnd.kit) + " node: " + formatFloat(hoverEnd.width / 100, "", 0, 1) + " m wide";
+            t = KitLabel(hoverEnd.kit) + (hoverEnd.joined ? " join: " : " node: ") + formatFloat(hoverEnd.width / 100, "", 0, 1) + " m wide" +
+                (nodeOffset != 0 ? ", to " + (nodeOffset > 0 ? "+" : "") + formatFloat(nodeOffset / 100, "", 0, 1) + " m" : "");
         else
             t = "level " + formatFloat(height / 100, "", 0, 1) + " m";
         tipText.text = t;
@@ -2235,7 +2446,8 @@ void ShowState()
     if (DrawCore_State() == kStateDrawing)
         note = track.length() + (track.length() == 1 ? " piece" : " pieces") + (fitNote != "" ? ": " + fitNote : "");
     else if (hoverEnd !is null)
-        note = "carries on this " + KitLabel(hoverEnd.kit) + " end";
+        note = hoverEnd.joined ? "a " + KitLabel(hoverEnd.kit) + " join: a line from here branches off the way you draw" :
+                                 "carries on this " + KitLabel(hoverEnd.kit) + " end";
     else if (pencil && unreachable)
         note = "the height is out of view here: a click starts 10 m below the camera";
     else
@@ -2272,7 +2484,12 @@ void Main()
 int lastState = 0;
 array<int> built;                       // a piece of each line built (newest last), for Ctrl+Z
 double undoCheckAt = -1;
+int movesAtPress = 0;                   // the editor's undo / redo steps when Ctrl+Z was pressed
 
+// Ctrl+Z after a line: the editor's own undo takes it (one step). Where the editor doesn't get the key (a plugin
+// window took the keyboard, say), Draw Track undoes it instead: once the editor has had 0.6 s and run no undo of its
+// own (counted by the host, so the two never both undo: a slow editor on a big map took the line, and then the step
+// before it went too, when this only waited 0.25 s and looked at the pieces).
 void WatchUndo(bool pencilOn)
 {
     if (Input::Down(Input::Ctrl) && (Input::Pressed(Input::Y) || (Input::Pressed(Input::Z) && Input::Down(Input::Shift))))
@@ -2281,16 +2498,20 @@ void WatchUndo(bool pencilOn)
         undoCheckAt = -1;
         return;
     }
-    if (pencilOn && built.length() > 0 && Input::Down(Input::Ctrl) && Input::Pressed(Input::Z) && !Input::Down(Input::Shift) && !Editor::Typing())
-        undoCheckAt = Host::Time() + 0.25;
-    if (undoCheckAt > 0 && Host::Time() >= undoCheckAt)
+    if (built.length() > 0 && Input::Down(Input::Ctrl) && Input::Pressed(Input::Z) && !Input::Down(Input::Shift) && !Editor::Typing())
     {
+        undoCheckAt = Host::Time() + 0.6;
+        movesAtPress = Editor::HistoryMoves();
+    }
+    if (undoCheckAt > 0 && (Host::Time() >= undoCheckAt || Editor::HistoryMoves() != movesAtPress))
+    {
+        bool editorDidIt = Editor::HistoryMoves() != movesAtPress;
         undoCheckAt = -1;
         int last = built[built.length() - 1];
-        if (Editor::PieceClass(last) != "")
+        if (!editorDidIt && Editor::PieceClass(last) != "")
         {
             Editor::Undo();
-            Log::Info("Ctrl+Z: undid the last line drawn");
+            Log::Info("Ctrl+Z: undid the last line drawn (the editor didn't)");
         }
         built.removeLast();
         openEndsAt = -10;
@@ -2350,10 +2571,16 @@ void Update(float dt)
     bool cursor = Input::MousePosition(mx, my);
     if (!drawingNow && cursor)
     {
+        FindNearJoins(mx, my);
         @hoverEnd = EndUnderCursor(mx, my);
+        if (hoverEnd !is offsetNode)
+        {
+            @offsetNode = hoverEnd;
+            nodeOffset = 0;             // a new node under the cursor starts at its own height
+        }
         if (hoverEnd !is null)
         {
-            height = hoverEnd.z;
+            height = hoverEnd.z + nodeOffset;
             heightSet = true;
         }
         else if (Input::Pressed(Input::MouseLeft) && !menu.hovered)
@@ -2385,6 +2612,7 @@ void Update(float dt)
     else if (drawingNow && cursor)
     {
         // the end it would join, while drawing
+        FindNearJoins(mx, my);
         OpenEnd@ e = EndUnderCursor(mx, my);
         if (e !is hoverEnd)
         {
@@ -2392,6 +2620,8 @@ void Update(float dt)
             fitAt = -10;
         }
     }
+    if (step != 0 && !drawingNow && hoverEnd !is null)
+        nodeOffset += step;             // over a node: the level the line from it goes to (kept while it's under the cursor)
     if (step != 0)
     {
         // while drawing, the line keeps its place in plan: the cursor's point on the raised (or lowered) plane is

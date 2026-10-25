@@ -13,7 +13,12 @@ in the track editor and track pieces drop into place along it.
   above the start you are.
 - The track is real kit pieces joined end to end: straights stretched to fit, 90-degree curves sized to how wide you
   drew each turn (from the curves the kit has), and slopes as steep as you draw them (up to 45 degrees). Track's
-  slopes start and end on its own ramp pieces (Ramp Curve1); tops are rounded with short pieces a few degrees apart. Where it would pass through a piece already there, it ramps up over it
+  slopes start on its own ramp pieces (Ramp Curve1) and go over the top on the same ramps turned upside down; other
+  kits round them with short pieces a few degrees apart.
+- Draw back to where a line started and it closes into a loop, its last piece running into its first.
+- Near the cursor, the joins between pieces show too (small white balls): start on one to branch off the track the way
+  you draw, or end on one to merge in. Page Up / Page Down over a node sets how high the line from it goes.
+- Lines are as few pieces as their shape allows (a straightaway is one piece) and drop into place in a wave. Where it would pass through a piece already there, it ramps up over it
   as a bridge; if it can't climb in time, the rest shows red and says to raise the level or go round.
 - **Kit** (the menu's list): **Track**, **Bevel Half**, **Bevel Full** or **Round**. A line started on a node is that
   node's kit (the menu switches to it); a line joins only nodes of its own kit (the others show small and grey).

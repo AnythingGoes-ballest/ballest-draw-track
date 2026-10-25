@@ -192,9 +192,23 @@ def end_faces(P, T, max_tilt=0.2):
     out = []
     for c in caps:
         joint, normal, prof, across = cap_info(c[0], c[1], c[2], centre)
-        out.append({"joint": joint, "normal": normal, "across": across, "width": float(np.ptp(prof[:, 0])),
-                    "tris": cap_2d(c[5], joint, across, normal)})
+        up = np.cross(normal, across)
+        up /= np.linalg.norm(up)
+        # the face's lowest point on its centre line: where a piece of even thickness, turned upside down, is ridden
+        near = np.abs(prof[:, 0]) < max(20.0, 0.05 * np.ptp(prof[:, 0]))
+        depth = float(prof[near, 1].min() if near.any() else prof[:, 1].min())
+        out.append({"joint": joint, "normal": normal, "across": across, "up": up, "width": float(np.ptp(prof[:, 0])),
+                    "bottom": joint + up * depth, "tris": cap_2d(c[5], joint, across, normal)})
     return out
+
+
+def upside_down(end):
+    """An end as it is with its piece rolled 180 degrees: its face from the bottom joint, turned over."""
+    t = end["tris"].copy()
+    depth = float(np.dot(end["bottom"] - end["joint"], end["up"]))
+    t[..., 0] = -t[..., 0]
+    t[..., 1] = depth - t[..., 1]
+    return dict(end, tris=t)
 
 
 def end_top(end, sz=1.0):

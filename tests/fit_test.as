@@ -49,7 +49,7 @@ void WorldEnd(Placed@ p, bool exitEnd, double &out x, double &out y, double &out
     KitPiece@ k = kit[p.piece];
     array<double>@ e = (exitEnd != p.viaB) ? k.b : k.a;
     array<double> m(9);
-    Axes(p.pitch, p.yaw, m);
+    AxesRoll(p.pitch, p.yaw, p.roll, m);
     double wx, wy, wz;
     Apply(m, e[0] * p.sx, e[1] * p.sy, e[2] * p.sz, wx, wy, wz);
     x = p.x + wx;
@@ -64,13 +64,14 @@ void WorldEnd(Placed@ p, bool exitEnd, double &out x, double &out y, double &out
 
 bool Finite(double v) { return v == v && Math::abs(v) < 1e12; }
 
-int sagCount = 0;
+int sagCount = 0, crestCount = 0;
 double steepest = 0;
 
 // The track just fitted: all of kit `k`, joined end to end. Returns how many turns it has.
 int CheckChain(int k, const string &in name)
 {
     sagCount = 0;
+    crestCount = 0;
     steepest = 0;
     Check(track.length() > 0, name + ": no pieces");
     int turnCount = 0;
@@ -85,6 +86,8 @@ int CheckChain(int k, const string &in name)
         Check(Near(p.sz, kit[p.piece].sz, 1e-6), at + ": height scale " + p.sz);
         if (kit[p.piece].sag)
             sagCount++;
+        else if (kit[p.piece].crest)
+            crestCount++;
         else if (!kit[p.piece].turn && Math::abs(p.pitch) > steepest)
             steepest = Math::abs(p.pitch);
         if (kit[p.piece].turn)
@@ -202,8 +205,9 @@ void Lines(int k)
     Check(top > z + 550, kn + " climb: up only " + formatFloat(top - z, "", 0, 1) + " cm");
     Check(Near(track[track.length() - 1].ez, z, 30), kn + " climb: ends at " + formatFloat(track[track.length() - 1].ez - z, "", 0, 1) + " cm");
     Check(kits[k].sags.length() == 0 || sagCount >= 2, kn + " climb: " + sagCount + " sags");
+    Check(kits[k].crests.length() == 0 || crestCount >= 2, kn + " climb: " + crestCount + " crests");
     Print(kn + " climb: " + track.length() + " pieces, up " + formatFloat(top - z, "", 0, 1) + " cm, steepest "
-          + formatFloat(steepest, "", 0, 1) + " degrees, " + sagCount + " sags");
+          + formatFloat(steepest, "", 0, 1) + " degrees, " + sagCount + " sags, " + crestCount + " crests");
 
     // the level scrolled up 3 m at the cursor without moving it (only the newest point is higher): the line's end
     // rises to it at once, the line leading up to it
@@ -231,6 +235,98 @@ void Lines(int k)
             footPieces++;
     Check(kits[k].sags.length() == 0 || (sagCount >= 1 && footPieces == 0), kn + " steps: " + sagCount + " sags, " + footPieces + " short pieces at the foot");
     Print(kn + " steps: " + track.length() + " pieces, " + sagCount + " sags");
+
+    // a loop: round and back to where it started (a little short of it): it closes, the last piece running into the
+    // first, at the start's height
+    Reset(k);
+    Stroke({0, 0, 6000, 0, 6000, 4000, -2500, 4000, -2500, 0, -200, 0}, z);
+    Refit();
+    CheckChain(k, kn + " loop");
+    Check(loopClosed, kn + " loop: not seen as a loop");
+    Placed@ lastPiece = track[track.length() - 1];
+    double gap = Math::sqrt((lastPiece.ex - track[0].jx) * (lastPiece.ex - track[0].jx) + (lastPiece.ey - track[0].jy) * (lastPiece.ey - track[0].jy) + (lastPiece.ez - track[0].jz) * (lastPiece.ez - track[0].jz));
+    Check(gap < 1, kn + " loop: ends " + formatFloat(gap, "", 0, 1) + " cm from its start (" + fitNote + ")");
+    double lx0, ly0, lz0, ldx, ldy, ldz, fx0, fy0, fz0, fdx, fdy, fdz;
+    WorldEnd(lastPiece, true, lx0, ly0, lz0, ldx, ldy, ldz);
+    WorldEnd(track[0], false, fx0, fy0, fz0, fdx, fdy, fdz);
+    Check(ldx * -fdx + ldy * -fdy + ldz * -fdz > 0.9999, kn + " loop: the last piece doesn't run into the first");
+    Print(kn + " loop: " + track.length() + " pieces, " + formatFloat(gap, "", 0, 2) + " cm from its start (" + fitNote + ")");
+
+    // a row of four 10 m straights already in the map (pieces 10 to 13, from -20 m to 20 m), joined at 0 between
+    // pieces 11 and 12: a line from that join goes the way it is drawn, along the row until it turns off (over the
+    // next piece too: its own road there, not in its way); one ending on it merges in the same way
+    for (int way = 0; way < 3; way++)
+    {
+        Reset(k);
+        for (int side = 0; side < 4; side++)
+        {
+            Obstacle o;
+            o.piece = 10 + side;
+            o.x = -1500 + side * 1000;
+            o.y = 0;
+            o.z = z - StraightLength(kits[k].straights[0]) * 0 - kit[kits[k].straights[0]].a[2];
+            Axes(0, 0, o.m);
+            o.sx = 1000 / StraightLength(kits[k].straights[0]);
+            BoxFor(ClassName(kit[kits[k].straights[0]].classPath), o);
+            o.top = BoxTop(o);
+            Bound(o);
+            obstacles.insertLast(o);
+        }
+        OpenEnd west, east;
+        west.x = east.x = 0;
+        west.y = east.y = 0;
+        west.z = east.z = z;
+        west.heading = 0;           // the west piece's end: out of it, eastward
+        east.heading = 180;         // the east piece's end: out of it, westward
+        west.width = east.width = kits[k].width;
+        west.kit = east.kit = k;
+        west.piece = 11;
+        east.piece = 12;
+        west.joined = east.joined = true;
+        @west.twin = east;
+        @east.twin = west;
+        string name;
+        // where the line turns off the row: 12 m out, or further for a kit whose turns are wider
+        double c = 2.2 * TurnRadius(kits[k].turns[0]) > 1200 ? 2.2 * TurnRadius(kits[k].turns[0]) : 1200;
+        if (way == 0)
+        {
+            name = " branch drawn east";
+            @startEnd = west;
+            Stroke({0, 0, c, 0, c, 4000}, z);
+        }
+        else if (way == 1)
+        {
+            name = " branch drawn west";
+            @startEnd = west;           // the cursor took one end of the join; the drawing picks the way
+            Stroke({0, 0, -c, 0, -c, 4000}, z);
+        }
+        else
+        {
+            name = " merging into a join";
+            @hoverEnd = east;
+            Stroke({c, 4000, c, 0, 0, 0}, z);
+        }
+        lineWidth = way < 2 ? kits[k].width : -1;
+        Refit();
+        CheckChain(k, kn + name);
+        Check(stopped < 0, kn + name + ": stopped (" + fitNote + ")");
+        double topZ = -1e9;
+        for (uint i = 0; i < track.length(); i++)
+            topZ = track[i].ez > topZ ? track[i].ez : topZ;
+        Check(topZ < z + 5, kn + name + ": lifted " + formatFloat(topZ - z, "", 0, 1) + " cm over the join's own pieces");
+        if (way < 2)
+        {
+            Check(Near(track[0].jx, 0, 1) && Near(track[0].jy, 0, 1), kn + name + ": doesn't start on the join");
+            double hx = track[0].ex - track[0].jx;
+            Check(way == 0 ? hx > 0 : hx < 0, kn + name + ": went the wrong way along the track");
+        }
+        else
+        {
+            Placed@ last = track[track.length() - 1];
+            Check(Near(last.ex, 0, 1) && Near(last.ey, 0, 1), kn + name + ": doesn't end on the join (" + fitNote + ")");
+        }
+        Print(kn + name + ": " + track.length() + " pieces (" + fitNote + ")");
+    }
 
     // over a Track M lying across the line at the line's height: bridged, clear of it
     Reset(k);
